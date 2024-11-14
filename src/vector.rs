@@ -3,13 +3,34 @@ use std::{
     ops::{Add, Mul, Sub},
 };
 
+use serde::{Deserialize, Serialize};
+
 #[derive(PartialEq, Clone, Copy, Debug)]
-pub struct Vector<A: PartialEq +Clone + Copy, const CAP: usize>([A; CAP]);
+pub struct Vector<A: PartialEq + Clone + Copy, const CAP: usize>([A; CAP]);
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VectorSerial<A: Clone + Copy>(Vec<A>);
+
+impl<A: PartialEq + Clone + Copy, const CAP: usize> From<VectorSerial<A>> for Vector<A, CAP> {
+    fn from(value: VectorSerial<A>) -> Self {
+        if value.0.len() != CAP {
+            panic!("Invalid size");
+        }
+
+        let mut iter = value.0.iter();
+
+        Vector(array::from_fn(|_| *(iter.next().unwrap())))
+    }
+}
+impl<A: PartialEq + Clone + Copy, const CAP: usize> From<Vector<A, CAP>> for VectorSerial<A> {
+    fn from(value: Vector<A, CAP>) -> Self {
+        VectorSerial(value.0.to_vec())
+    }
+}
 
 impl<A: PartialEq + Clone + Copy, const CAP: usize> Vector<A, CAP> {
     pub fn splat(val: A) -> Self {
-        let mut iter = (0..CAP)
-            .map(|_| val);
+        let mut iter = (0..CAP).map(|_| val);
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
     // pub fn zero() -> Self {
@@ -19,19 +40,11 @@ impl<A: PartialEq + Clone + Copy, const CAP: usize> Vector<A, CAP> {
     //     todo!()
     // }
 
-    // pub fn max() -> Self {
-    //     todo!()
-    // } 
-    // pub fn min() -> Self {
-    //     todo!()
-    // } 
-
     pub fn scalar_mul(scalar: A, vec: &Self) -> Self
-    where A: Default + Mul<Output = A>
+    where
+        A: Default + Mul<Output = A>,
     {
-        let mut iter = vec.0
-            .iter()
-            .map(|a| scalar * *a);
+        let mut iter = vec.0.iter().map(|a| scalar * *a);
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
 }
@@ -53,7 +66,7 @@ macro_rules! extremes {
                     .map(|_| $head::MAX);
                 Vector(array::from_fn(|_| iter.next().unwrap()))
             }
-            
+
         }
     };
 }
@@ -102,4 +115,3 @@ where
             .fold(A::default(), |acc, next| acc + next)
     }
 }
-

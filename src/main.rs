@@ -1,6 +1,7 @@
 use vector::Vector;
 
-mod vector;
+mod db;
+pub(crate) mod vector;
 
 fn main() {
     println!("Hello, world!");
