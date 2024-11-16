@@ -1,7 +1,8 @@
-use vector::Vector;
+use vector::{Extremes, Vector};
 
 mod db;
-pub(crate) mod vector;
+pub mod ops;
+pub mod vector;
 
 fn main() {
     println!("Hello, world!");
