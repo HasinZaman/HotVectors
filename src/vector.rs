@@ -12,12 +12,21 @@ pub trait Extremes {
     fn multiplicative_identity() -> Self;
 }
 
-pub trait VectorSpace<A> {
+pub trait Field<A> {
+    fn add(lhs: &Self, rhs: &Self) -> Self;
+    fn sub(lhs: &Self, rhs: &Self) -> Self;
+    fn mult(lhs: &Self, rhs: &Self) -> Self;
+    fn div(lhs: &Self, rhs: &Self) -> Self;
+    fn additive_identity() -> Self;
+    fn multiplicative_identity() -> Self;
+}
+
+pub trait VectorSpace<A: Field<A>> {
     fn add(lhs: &Self, rhs: &Self) -> Self;
 
     fn sub(lhs: &Self, rhs: &Self) -> Self;
 
-    fn dot(lhs: &Self, rhs: &Self) -> Self;
+    fn dot(lhs: &Self, rhs: &Self) -> A;
 
     fn scalar_mult(lhs: &Self, scalar: &A) -> Self;
 }
@@ -25,31 +34,29 @@ pub trait VectorSpace<A> {
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub struct Vector<A: PartialEq + Clone + Copy, const CAP: usize>([A; CAP]);
 
-impl<
-        A: PartialEq + Clone + Copy + Add<Output = A> + Sub<Output = A> + Mul<Output = A>,
-        const CAP: usize,
-    > VectorSpace<A> for Vector<A, CAP>
-{
+impl<A: PartialEq + Clone + Copy + Field<A>, const CAP: usize> VectorSpace<A> for Vector<A, CAP> {
     fn add(lhs: &Self, rhs: &Self) -> Self {
-        let mut iter = (lhs.0).iter().zip(rhs.0.iter()).map(|(a, b)| *a + *b);
+        let mut iter = (lhs.0).iter().zip(rhs.0.iter()).map(|(a, b)| A::add(a, b));
 
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
 
     fn sub(lhs: &Self, rhs: &Self) -> Self {
-        let mut iter = (lhs.0).iter().zip(rhs.0.iter()).map(|(a, b)| *a - *b);
+        let mut iter = (lhs.0).iter().zip(rhs.0.iter()).map(|(a, b)| A::sub(a, b));
 
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
 
-    fn dot(lhs: &Self, rhs: &Self) -> Self {
-        let mut iter = (lhs.0).iter().zip(rhs.0.iter()).map(|(a, b)| *a * *b);
-
-        Vector(array::from_fn(|_| iter.next().unwrap()))
+    fn dot(lhs: &Self, rhs: &Self) -> A {
+        (lhs.0)
+            .iter()
+            .zip(rhs.0.iter())
+            .map(|(a, b)| A::mult(a, b))
+            .fold(A::additive_identity(), |acc, next| A::add(&acc, &next))
     }
 
     fn scalar_mult(vec: &Self, scalar: &A) -> Self {
-        let mut iter = vec.0.iter().map(|a| *scalar * *a);
+        let mut iter = vec.0.iter().map(|a| A::mult(scalar, a));
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
 }
