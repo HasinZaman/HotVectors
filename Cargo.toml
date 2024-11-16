@@ -8,3 +8,5 @@ uuid = {version = "*", features = ["v4", "serde"]}
 bitcode = "=0.6.3"
 serde = {version = "1.0.215", features = ["derive"]}
 petgraph = "0.6.5"
+heapify = "0.2.0"
+chrono = "*"
