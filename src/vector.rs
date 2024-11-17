@@ -1,7 +1,6 @@
-use std::{
-    array,
-    ops::{Add, Mul, Sub},
-};
+use std::
+    array
+;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +20,7 @@ pub trait Field<A> {
     fn multiplicative_identity() -> Self;
 }
 
+
 pub trait VectorSpace<A: Field<A>> {
     fn add(lhs: &Self, rhs: &Self) -> Self;
 
@@ -32,7 +32,7 @@ pub trait VectorSpace<A: Field<A>> {
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
-pub struct Vector<A: PartialEq + Clone + Copy, const CAP: usize>([A; CAP]);
+pub struct Vector<A: PartialEq + Clone + Copy, const CAP: usize>(pub [A; CAP]);
 
 impl<A: PartialEq + Clone + Copy + Field<A>, const CAP: usize> VectorSpace<A> for Vector<A, CAP> {
     fn add(lhs: &Self, rhs: &Self) -> Self {
@@ -116,6 +116,31 @@ macro_rules! extremes_int {
                 Vector(array::from_fn(|_| iter.next().unwrap()))
             }
         }
+        impl Field<$head> for $head {
+            fn add(lhs: &Self, rhs: &Self) -> Self {
+                lhs + rhs
+            }
+
+            fn sub(lhs: &Self, rhs: &Self) -> Self {
+                lhs - rhs
+            }
+
+            fn mult(lhs: &Self, rhs: &Self) -> Self {
+                lhs * rhs
+            }
+
+            fn div(lhs: &Self, rhs: &Self) -> Self {
+                lhs / rhs
+            }
+
+            fn additive_identity() -> Self {
+                0
+            }
+
+            fn multiplicative_identity() -> Self {
+                1
+            }
+        }
     };
 }
 macro_rules! extremes_float {
@@ -144,6 +169,31 @@ macro_rules! extremes_float {
                 let mut iter = (0..CAP)
                     .map(|_| 1.);
                 Vector(array::from_fn(|_| iter.next().unwrap()))
+            }
+        }
+        impl Field<$head> for $head {
+            fn add(lhs: &Self, rhs: &Self) -> Self {
+                lhs + rhs
+            }
+
+            fn sub(lhs: &Self, rhs: &Self) -> Self {
+                lhs - rhs
+            }
+
+            fn mult(lhs: &Self, rhs: &Self) -> Self {
+                lhs * rhs
+            }
+
+            fn div(lhs: &Self, rhs: &Self) -> Self {
+                lhs / rhs
+            }
+
+            fn additive_identity() -> Self {
+                0.
+            }
+
+            fn multiplicative_identity() -> Self {
+                1.
             }
         }
     };
