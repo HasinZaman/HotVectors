@@ -1,19 +1,18 @@
-use std::{array, marker::PhantomData};
+use std::{array, collections::HashMap, marker::PhantomData, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use petgraph::{Graph, Undirected};
+use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
-use super::{Partition, VectorEntry};
+use super::{Internal, Partition, PartitionGraph, VectorEntry};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {
     vectors: Vec<VectorEntrySerial<A>>,
     centroid: VectorSerial<A>,
-
-    #[serde(with = "uuid::serde::compact")]
-    id: Uuid,
+    id: String,
 }
 
 impl<
@@ -35,7 +34,7 @@ where
                 .map(|x| Into::<VectorEntrySerial<A>>::into(x))
                 .collect::<Vec<VectorEntrySerial<A>>>(),
             centroid: value.centroid.into(),
-            id: value.id,
+            id: value.id.to_string(),
         }
     }
 }
@@ -58,16 +57,15 @@ where
             size: value.vectors.len(),
             vectors: array::from_fn(|_| iter.next()),
             centroid: value.centroid.into(),
-            id: value.id,
+            id: Uuid::from_str(&value.id).unwrap(),
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 pub struct VectorEntrySerial<A: Clone + Copy> {
     vector: VectorSerial<A>,
-    #[serde(with = "uuid::serde::compact")]
-    id: Uuid,
+    id: String,
 }
 
 impl<
@@ -79,7 +77,7 @@ impl<
     fn from(value: VectorEntry<A, B, CAP>) -> Self {
         VectorEntrySerial {
             vector: value.vector.into(),
-            id: value.id,
+            id: value.id.to_string(),
         }
     }
 }
@@ -92,8 +90,66 @@ impl<
     fn from(value: VectorEntrySerial<A>) -> Self {
         VectorEntry {
             vector: value.vector.into(),
-            id: value.id,
+            id: Uuid::from_str(&value.id).unwrap(),
             _phantom_data: PhantomData,
         }
+    }
+}
+
+#[derive(Archive, Serialize, Deserialize)]
+pub struct PartitionGraphSerial<A> {
+    ids: Vec<String>,
+    connections: Vec<(usize, usize, A)>,
+}
+
+impl<A: Field<A> + Clone + Copy> From<PartitionGraph<A, Internal>> for PartitionGraphSerial<A> {
+    fn from(value: PartitionGraph<A, Internal>) -> Self {
+        PartitionGraphSerial {
+            ids: value
+                .0
+                .raw_nodes()
+                .iter()
+                .map(|node| node.weight.to_string())
+                .collect::<Vec<String>>(),
+            connections: value
+                .0
+                .raw_edges()
+                .iter()
+                .map(|edge| (edge.source().index(), edge.target().index(), edge.weight))
+                .collect::<Vec<(usize, usize, A)>>(),
+        }
+    }
+}
+
+impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for PartitionGraph<A, Internal> {
+    fn from(value: PartitionGraphSerial<A>) -> Self {
+        let mut graph: Graph<Uuid, A, Undirected> = Graph::<Uuid, A, Undirected>::new_undirected();
+        let mut uuid_to_index = HashMap::new();
+
+        value
+            .ids
+            .iter()
+            .map(|id| Uuid::from_str(id).unwrap())
+            .for_each(|id| {
+                let idx = graph.add_node(id);
+
+                uuid_to_index.insert(id, idx);
+            });
+
+        value
+            .connections
+            .iter()
+            .map(|(i1, i2, weight)| {
+                (
+                    uuid_to_index[&Uuid::from_str(&value.ids[*i1]).unwrap()],
+                    uuid_to_index[&Uuid::from_str(&value.ids[*i2]).unwrap()],
+                    weight,
+                )
+            })
+            .for_each(|(id1, id2, weight)| {
+                graph.add_edge(id1, id2, *weight);
+            });
+
+        PartitionGraph(graph, PhantomData::<Internal>)
     }
 }

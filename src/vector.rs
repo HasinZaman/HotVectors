@@ -1,8 +1,6 @@
-use std::
-    array
-;
+use std::{array, fmt::Debug};
 
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 pub trait Extremes {
     fn min() -> Self;
@@ -19,7 +17,6 @@ pub trait Field<A> {
     fn additive_identity() -> Self;
     fn multiplicative_identity() -> Self;
 }
-
 
 pub trait VectorSpace<A: Field<A>> {
     fn add(lhs: &Self, rhs: &Self) -> Self;
@@ -61,7 +58,7 @@ impl<A: PartialEq + Clone + Copy + Field<A>, const CAP: usize> VectorSpace<A> fo
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 pub struct VectorSerial<A: Clone + Copy>(Vec<A>);
 
 impl<A: PartialEq + Clone + Copy, const CAP: usize> From<VectorSerial<A>> for Vector<A, CAP> {

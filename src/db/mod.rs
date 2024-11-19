@@ -1,10 +1,116 @@
-use std::{collections::HashMap, marker::PhantomData, mem, ops::Index};
+use std::{
+    array,
+    collections::HashMap,
+    marker::PhantomData,
+    mem,
+    ops::Index,
+    sync::{
+        mpsc::{Receiver, Sender},
+        RwLock,
+    },
+};
 
+use chrono::format::Pad;
+use petgraph::{csr::DefaultIx, Graph, Undirected};
+use rancor::Strategy;
+use rkyv::{
+    bytecheck::CheckBytes,
+    de::Pool,
+    deserialize, from_bytes, rancor,
+    rend::u32_le,
+    tuple::ArchivedTuple3,
+    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
+    Archive, DeserializeUnsized,
+};
+use serde::{Deserialize, Serialize};
+use serialization::{PartitionGraphSerial, PartitionSerial};
 use uuid::Uuid;
 
-use crate::vector::{Extremes, Field, VectorSpace};
+use crate::vector::{Extremes, Field, VectorSerial, VectorSpace};
 
 mod serialization;
+
+fn db_loop() -> ! {
+    // initialize partitions
+    // load external graphs
+    // initialize internal graphs
+    // initialize locks
+    loop {}
+}
+
+fn split_partition<
+    'a,
+    A: Clone + Copy + PartialEq + Field<A>,
+    B: Clone + Copy + VectorSpace<A> + Extremes,
+    const PARTITION_CAP: usize,
+    const VECTOR_CAP: usize,
+>(
+    partition: &'a mut Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    internal_graphs: &[&'a mut PartitionGraph<A, Internal>],
+    external_graphs: &[&'a mut PartitionGraph<A, External>],
+) -> (
+    Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    Vec<PartitionGraph<A, Internal>>,
+) {
+    // select random
+    let mut new_partition: Partition<A, B, PARTITION_CAP, VECTOR_CAP> = Partition::new();
+
+    // select to random points
+
+    // divide
+
+    todo!()
+}
+
+fn merge_partition<
+    'a,
+    A: Clone + Copy + PartialEq + Field<A>,
+    B: Clone + Copy + VectorSpace<A>,
+    const PARTITION_CAP: usize,
+    const VECTOR_CAP: usize,
+>(
+    sink_partitions: &'a mut Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    sink_internal_graphs: &[&'a mut PartitionGraph<A, Internal>],
+
+    source_partitions: &[&'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
+    source_internal_graphs: &[&[&'a mut PartitionGraph<A, Internal>]],
+
+    external_graphs: &[&'a mut PartitionGraph<A, External>],
+) -> (
+    Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    Vec<PartitionGraph<A, Internal>>,
+) {
+    // select random
+    todo!()
+}
+
+async fn update_partition<
+    A: Clone + Copy + PartialEq + Field<A>,
+    B: Clone + Copy + VectorSpace<A>,
+    const PARTITION_CAP: usize,
+    const VECTOR_CAP: usize,
+>(
+    start_partitions: Uuid,
+    external_graphs: Vec<PartitionGraph<A, External>>,
+
+    partition_receiver: Receiver<(
+        Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+        Vec<PartitionGraph<A, Internal>>,
+    )>,
+    partition_request: Sender<Uuid>,
+) -> (
+    Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    Vec<PartitionGraph<A, Internal>>,
+) {
+    todo!()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PartitionState {
+    Read(bool, bool),
+    Write,
+    Free,
+}
 
 pub struct LoadedPartitions<
     A: PartialEq + Clone + Copy + Field<A>,
@@ -13,14 +119,54 @@ pub struct LoadedPartitions<
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
 > {
-    partitions: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>,
-    stats: Vec<(u64,)>,
+    loaded: RwLock<usize>,
+    partitions: [RwLock<
+        Option<(
+            Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+            PartitionGraph<A, Internal>,
+        )>,
+    >; MAX_LOADED],
+    load_state: [RwLock<Option<PartitionState>>; MAX_LOADED],
+
+    // internal_graphs: [Option<Box<PartitionGraph<A, Internal>>>; MAX_LOADED],
+
+    // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
+    // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
     hash_map: HashMap<Uuid, usize>,
 }
 
+pub enum Error {
+    FileDoesNotExist,
+    NotEnoughSpace,
+    AllLocksInUse,
+}
+
+impl From<std::io::Error> for Error {
+    fn from(value: std::io::Error) -> Self {
+        Error::FileDoesNotExist
+    }
+}
+impl From<rancor::Error> for Error {
+    fn from(value: rancor::Error) -> Self {
+        todo!()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Internal(Uuid);
+
+#[derive(Clone, Copy)]
+struct External(Uuid);
+
+#[derive(Debug, Archive)]
+pub struct PartitionGraph<A: Field<A>, B>(Graph<Uuid, A, Undirected, DefaultIx>, PhantomData<B>);
+
+const SOURCE_DIR: &str = "partitions";
+const META_DIR: &str = "partitions";
+
 impl<
         A: PartialEq + Clone + Copy + Field<A>,
-        B: VectorSpace<A> + Sized + Clone + Copy,
+        B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
         const PARTITION_CAP: usize,
         const VECTOR_CAP: usize,
         const MAX_LOADED: usize,
@@ -28,14 +174,75 @@ impl<
 {
     pub fn new() -> Self {
         LoadedPartitions {
-            partitions: Vec::new(),
-            stats: Vec::new(),
+            loaded: RwLock::new(0),
+            partitions: array::from_fn(|_| RwLock::new(None)),
+            load_state: array::from_fn(|_| RwLock::new(None)),
 
             hash_map: HashMap::new(),
         }
     }
-    pub async fn load(&mut self, id: Uuid) -> Result<(), ()> {
-        todo!()
+
+    pub async fn load(&mut self, id: Uuid) -> Result<(), Error>
+    where
+        A: Archive,
+        for<'a> <A as Archive>::Archived:
+            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+        [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+
+        [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
+            DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
+    {
+        if *self.loaded.read().unwrap() >= PARTITION_CAP {
+            return Err(Error::NotEnoughSpace);
+        }
+
+        // find earliest empty value
+        let i1 = self
+            .partitions
+            .iter()
+            .enumerate()
+            .filter(|(_index, partition)| match partition.try_read() {
+                Ok(partition) => match *partition {
+                    Some(_) => false,
+                    None => true,
+                },
+                Err(_err) => false,
+            })
+            .map(|(index, _partition)| index)
+            .next();
+
+        let Some(i1) = i1 else {
+            return Err(Error::AllLocksInUse);
+        };
+
+        //get access to RwLock
+        let mut partition_block = self.partitions[i1].write().unwrap();
+        let mut partition_block = partition_block.as_mut();
+
+        let mut load_state = self.load_state[i1].write().unwrap();
+        let mut load_state = load_state.as_mut();
+
+        //load files
+        let new_partition: Partition<A, B, PARTITION_CAP, VECTOR_CAP> = {
+            let bytes = tokio::fs::read(&format!("{SOURCE_DIR}//{id}.partition")).await?;
+
+            from_bytes::<PartitionSerial<A>, rancor::Error>(&bytes)?.into()
+        };
+        let new_internal_graph: PartitionGraph<A, Internal> = {
+            let bytes = tokio::fs::read(&format!("{SOURCE_DIR}//{id}.graph")).await?;
+
+            from_bytes::<PartitionGraphSerial<A>, rancor::Error>(&bytes)?.into()
+        };
+
+        //assign values
+        partition_block.replace(&mut (new_partition, new_internal_graph));
+        load_state.replace(&mut PartitionState::Free);
+
+        let mut loaded = *self.loaded.write().unwrap();
+
+        loaded += 1;
+
+        Ok(())
     }
     pub fn unload_by_id(&mut self, id: Uuid) -> Result<(), ()> {
         todo!()
@@ -44,6 +251,10 @@ impl<
         todo!()
     }
     pub fn unload_by_youngest(&mut self, id: Uuid) -> Result<(), ()> {
+        todo!()
+    }
+
+    pub fn read(&mut self, id: Uuid) -> Result<(), ()> {
         todo!()
     }
 }
