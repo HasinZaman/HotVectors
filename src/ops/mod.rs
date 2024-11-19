@@ -31,7 +31,7 @@ pub fn knn<'a, A, B: PartialOrd + PartialEq>(
         .collect::<Vec<KeyValuePair<&A, B>>>();
 
     if data.len() == 0 {
-        return vec![]
+        return vec![];
     }
 
     make_heap(&mut data);
@@ -55,20 +55,24 @@ pub fn euclidean_dist<A: PartialOrd + PartialEq + Field<A>, B: VectorSpace<A>>(
 }
 
 #[cfg(test)]
-mod tests{
-    use crate::{ops::{euclidean_dist, knn}, vector::Vector};
+mod tests {
+    use crate::{
+        ops::{euclidean_dist, knn},
+        vector::Vector,
+    };
 
     #[test]
     fn test_knn_single_neighbor() {
         let data = vec![
-            vec![
-                Vector([1.0, 2.0]),
-                Vector([2.0, 3.0]),
-            ],
+            vec![Vector([1.0, 2.0]), Vector([2.0, 3.0])],
             vec![Vector([3.0, 4.0]), Vector([5.0, 6.0])],
         ];
 
-        let result = knn(vec![data[0].as_slice(), data[1].as_slice()].as_slice(), |x| euclidean_dist(&Vector([1.0, 2.0]), x), 1);
+        let result = knn(
+            vec![data[0].as_slice(), data[1].as_slice()].as_slice(),
+            |x| euclidean_dist(&Vector([1.0, 2.0]), x),
+            1,
+        );
 
         // Closest to origin is Vector([1.0, 2.0])
         assert_eq!(*result[0], Vector([1.0, 2.0]));
@@ -80,17 +84,17 @@ mod tests{
             Vector([1.0, 2.0]),
             Vector([2.0, 3.0]),
             Vector([3.0, 4.0]),
-            Vector([5.0, 6.0])
+            Vector([5.0, 6.0]),
         ];
 
-        let result = knn(&[data.as_slice()], |x| euclidean_dist(&Vector([1.0, 2.0]), x), 3);
+        let result = knn(
+            &[data.as_slice()],
+            |x| euclidean_dist(&Vector([1.0, 2.0]), x),
+            3,
+        );
 
         // Closest vectors to origin
-        let expected = vec![
-            Vector([1.0, 2.0]),
-            Vector([2.0, 3.0]),
-            Vector([3.0, 4.0]),
-        ];
+        let expected = vec![Vector([1.0, 2.0]), Vector([2.0, 3.0]), Vector([3.0, 4.0])];
 
         for (res, exp) in result.iter().zip(expected.iter()) {
             assert_eq!(**res, *exp);
@@ -101,7 +105,11 @@ mod tests{
     fn test_knn_with_ties() {
         let data = vec![Vector([1.0, 1.0]), Vector([1.0, 1.0])];
 
-        let result = knn(&[data.as_slice()], |x| euclidean_dist(&Vector([1.0, 2.0]), x), 2);
+        let result = knn(
+            &[data.as_slice()],
+            |x| euclidean_dist(&Vector([1.0, 2.0]), x),
+            2,
+        );
 
         // Both vectors are identical, so any order is acceptable
         assert_eq!(*result[0], Vector([1.0, 1.0]));
@@ -112,7 +120,11 @@ mod tests{
     fn test_knn_no_data() {
         let data = vec![];
 
-        let result = knn(&[data.as_slice()], |x| euclidean_dist(&Vector([1.0, 2.0]), x), 3);
+        let result = knn(
+            &[data.as_slice()],
+            |x| euclidean_dist(&Vector([1.0, 2.0]), x),
+            3,
+        );
 
         // No neighbors should be returned
         assert!(result.is_empty());
