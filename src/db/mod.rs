@@ -10,19 +10,18 @@ use std::{
     },
 };
 
-use chrono::format::Pad;
 use petgraph::{csr::DefaultIx, Graph, Undirected};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
     de::Pool,
-    deserialize, from_bytes, rancor,
+    from_bytes, rancor,
     rend::u32_le,
+    to_bytes,
     tuple::ArchivedTuple3,
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, DeserializeUnsized,
 };
-use serde::{Deserialize, Serialize};
 use serialization::{PartitionGraphSerial, PartitionSerial};
 use uuid::Uuid;
 
@@ -132,13 +131,14 @@ pub struct LoadedPartitions<
 
     // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
     // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
-    hash_map: HashMap<Uuid, usize>,
+    hash_map: RwLock<HashMap<Uuid, usize>>,
 }
 
 pub enum Error {
     FileDoesNotExist,
     NotEnoughSpace,
     AllLocksInUse,
+    NotInMemory,
 }
 
 impl From<std::io::Error> for Error {
@@ -178,7 +178,7 @@ impl<
             partitions: array::from_fn(|_| RwLock::new(None)),
             load_state: array::from_fn(|_| RwLock::new(None)),
 
-            hash_map: HashMap::new(),
+            hash_map: RwLock::new(HashMap::new()),
         }
     }
 
@@ -244,14 +244,73 @@ impl<
 
         Ok(())
     }
-    pub fn unload_by_id(&mut self, id: Uuid) -> Result<(), ()> {
-        todo!()
-    }
-    pub fn unload_by_least_used(&mut self, id: Uuid) -> Result<(), ()> {
-        todo!()
-    }
-    pub fn unload_by_youngest(&mut self, id: Uuid) -> Result<(), ()> {
-        todo!()
+    pub async fn unload_at_index(&mut self, index: usize) -> Result<(), Error>
+    where
+        VectorSerial<A>: From<B>,
+        A: for<'a> rkyv::Serialize<
+            rancor::Strategy<
+                rkyv::ser::Serializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'a>,
+                    rkyv::ser::sharing::Share,
+                >,
+                rancor::Error,
+            >,
+        >, // for<'a> rkyv::Serialize<Strategy<rkyv::ser::Serializer<AlignedVec, ArenaHandle<'a>, Share>, _>>
+    {
+        let mut partition = self.partitions[index].write().unwrap();
+        let state = self.load_state[index].write().unwrap();
+        let mut hash_map = self.hash_map.write().unwrap();
+        let mut load_state = self.load_state[index].write().unwrap();
+        let id = {
+            let (partition, graph) = {
+                let mut tmp_value = None;
+
+                mem::swap(&mut tmp_value, &mut partition);
+
+                match tmp_value {
+                    Some(value) => value,
+                    None => {
+                        return Err(Error::NotInMemory);
+                    }
+                }
+            };
+
+            {
+                let partition_serial: PartitionSerial<A> = partition.into();
+                let bytes = to_bytes::<rancor::Error>(&partition_serial)?;
+
+                tokio::fs::write(
+                    &format!("{SOURCE_DIR}//{}.partition", partition.id.to_string()),
+                    bytes.as_slice(),
+                )
+                .await?;
+            }
+            {
+                let graph_serial: PartitionGraphSerial<A> = graph.into();
+                let bytes = to_bytes::<rancor::Error>(&graph_serial)?;
+
+                tokio::fs::write(
+                    &format!("{SOURCE_DIR}//{}.graph", partition.id.to_string()),
+                    bytes.as_slice(),
+                )
+                .await?;
+            }
+
+            partition.id
+        };
+        {
+            let mut state = *state;
+
+            let _ = mem::replace(&mut state, None);
+        }
+
+        hash_map.remove(&id);
+
+        let mut loaded = *self.loaded.write().unwrap();
+        loaded -= 1;
+
+        Ok(())
     }
 
     pub fn read(&mut self, id: Uuid) -> Result<(), ()> {
