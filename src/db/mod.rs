@@ -5,8 +5,7 @@ use std::{
     mem,
     ops::Index,
     sync::{
-        mpsc::{Receiver, Sender},
-        RwLock,
+        mpsc::{Receiver, Sender}, Arc, Condvar, Mutex, RwLock, RwLockReadGuard
     },
 };
 
@@ -106,7 +105,7 @@ async fn update_partition<
 
 #[derive(Debug, Clone, Copy)]
 enum PartitionState {
-    Read(bool, bool),
+    Read(usize),
     Write,
     Free,
 }
@@ -119,13 +118,15 @@ pub struct LoadedPartitions<
     const MAX_LOADED: usize,
 > {
     loaded: RwLock<usize>,
-    partitions: [RwLock<
-        Option<(
-            Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-            PartitionGraph<A, Internal>,
-        )>,
+    partitions: [Arc<
+        RwLock<
+            Option<(
+                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                PartitionGraph<A, Internal>,
+            )>,
+        >,
     >; MAX_LOADED],
-    load_state: [RwLock<Option<PartitionState>>; MAX_LOADED],
+    load_state: [RwLock<Option<(usize, PartitionState, Option<bool>)>>; MAX_LOADED],
 
     // internal_graphs: [Option<Box<PartitionGraph<A, Internal>>>; MAX_LOADED],
 
@@ -175,7 +176,7 @@ impl<
     pub fn new() -> Self {
         LoadedPartitions {
             loaded: RwLock::new(0),
-            partitions: array::from_fn(|_| RwLock::new(None)),
+            partitions: array::from_fn(|_| Arc::new(RwLock::new(None))),
             load_state: array::from_fn(|_| RwLock::new(None)),
 
             hash_map: RwLock::new(HashMap::new()),
@@ -236,7 +237,7 @@ impl<
 
         //assign values
         partition_block.replace(&mut (new_partition, new_internal_graph));
-        load_state.replace(&mut PartitionState::Free);
+        load_state.replace(&mut (0usize, PartitionState::Free, None));
 
         let mut loaded = *self.loaded.write().unwrap();
 
@@ -313,8 +314,50 @@ impl<
         Ok(())
     }
 
-    pub fn read(&mut self, id: Uuid) -> Result<(), ()> {
-        todo!()
+    pub fn read(
+        &mut self,
+        id: Uuid,
+        tx: &mut Sender<(
+            Arc<RwLock<Option<(
+                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                PartitionGraph<A, Internal>,
+            )>>>,
+            Arc<(
+                Condvar,
+                Mutex<bool>
+            )>
+        )>,
+    ) -> Result<(), ()> {
+
+        let index = {
+            let hash_map = self.hash_map.read().unwrap();
+
+            match hash_map.get(&id) {
+                Some(index) => *index,
+                None => todo!(),
+            }
+        };
+        let pair_1 = Arc::new(
+            (
+                Condvar::new(),
+                Mutex::new(false)
+            )
+        );
+
+        let pair_2 = Arc::clone(&pair_1);
+        {
+            let _ = tx.send((
+                self.partitions[index].clone(),
+                pair_2
+            ));
+        }
+
+        let (cvar, lock) = &*pair_1;
+
+        let started = lock.lock().unwrap();
+        drop(cvar.wait(started));
+    
+        Ok(())
     }
 }
 
