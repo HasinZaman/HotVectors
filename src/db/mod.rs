@@ -126,7 +126,7 @@ pub struct LoadedPartitions<
             )>,
         >,
     >; MAX_LOADED],
-    load_state: [RwLock<Option<(usize, PartitionState, Option<bool>)>>; MAX_LOADED],
+    load_state: [RwLock<Option<(usize, usize)>>; MAX_LOADED],
 
     // internal_graphs: [Option<Box<PartitionGraph<A, Internal>>>; MAX_LOADED],
 
@@ -237,7 +237,7 @@ impl<
 
         //assign values
         partition_block.replace(&mut (new_partition, new_internal_graph));
-        load_state.replace(&mut (0usize, PartitionState::Free, None));
+        load_state.replace(&mut (0usize, 0usize));
 
         let mut loaded = *self.loaded.write().unwrap();
 
@@ -314,7 +314,7 @@ impl<
         Ok(())
     }
 
-    pub fn read(
+    pub async fn access(
         &mut self,
         id: Uuid,
         tx: &mut Sender<(
@@ -337,6 +337,10 @@ impl<
                 None => todo!(),
             }
         };
+        let mut use_count = self.load_state[index].write().unwrap();
+        if let None = *use_count {
+            todo!()
+        };
         let pair_1 = Arc::new(
             (
                 Condvar::new(),
@@ -357,6 +361,10 @@ impl<
         let started = lock.lock().unwrap();
         drop(cvar.wait(started));
     
+        if let Some(use_count) = use_count.as_mut() {
+            use_count.1 = use_count.1+1;
+        };
+
         Ok(())
     }
 }
