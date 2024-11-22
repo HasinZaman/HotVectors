@@ -22,6 +22,7 @@ use rkyv::{
     Archive, DeserializeUnsized,
 };
 use serialization::{PartitionGraphSerial, PartitionSerial};
+use tokio::runtime;
 use uuid::Uuid;
 
 use crate::vector::{Extremes, Field, VectorSerial, VectorSpace};
@@ -33,6 +34,15 @@ fn db_loop() -> ! {
     // load external graphs
     // initialize internal graphs
     // initialize locks
+    let rt = runtime::Builder::new_current_thread()
+        .build().unwrap();
+
+    // if 
+    rt.spawn(async move {
+        loop {
+
+        }
+    });
     loop {}
 }
 
@@ -366,6 +376,34 @@ impl<
         };
 
         Ok(())
+    }
+
+    pub fn least_used(&self) -> Option<usize> {
+        let mut iter = self.load_state
+            .iter()
+            .map(|x| x.try_read())
+            .enumerate()
+            .filter(|(_index, x)| x.is_ok())
+            .map(|(index, x)| (index, x.unwrap()))
+            .filter(|(_index, x)| x.is_some())
+            .map(|(index, x)| (index, x.unwrap()));
+
+        let Some(head) = iter.next() else {
+            return None;
+        };
+
+        Some(
+            iter.fold(
+                head,
+                |(acc_index, (acc_prev, acc_cur)), (next_index, (next_prev, next_cur))| {
+                    if next_prev + next_cur < acc_prev + acc_cur {
+                        (next_index, (next_prev, next_cur))
+                    } else {
+                        (acc_index, (acc_prev, acc_cur))
+                    }
+                }
+            ).0
+        )
     }
 }
 
