@@ -5,9 +5,12 @@ use std::{
     mem,
     ops::Index,
     sync::{
-        mpsc::{Receiver, Sender}, Arc, Condvar, Mutex, RwLock, RwLockReadGuard
+        mpsc::{Receiver, Sender},
+        Arc, Condvar, Mutex,
     },
 };
+
+use std::sync::RwLock as StdRwLock;
 
 use petgraph::{csr::DefaultIx, Graph, Undirected};
 use rancor::Strategy;
@@ -23,6 +26,7 @@ use rkyv::{
 };
 use serialization::{PartitionGraphSerial, PartitionSerial};
 use tokio::runtime;
+use tokio::sync::RwLock as TokioRwLock;
 use uuid::Uuid;
 
 use crate::vector::{Extremes, Field, VectorSerial, VectorSpace};
@@ -34,15 +38,10 @@ fn db_loop() -> ! {
     // load external graphs
     // initialize internal graphs
     // initialize locks
-    let rt = runtime::Builder::new_current_thread()
-        .build().unwrap();
+    let rt = runtime::Builder::new_current_thread().build().unwrap();
 
-    // if 
-    rt.spawn(async move {
-        loop {
-
-        }
-    });
+    // if
+    rt.spawn(async move { loop {} });
     loop {}
 }
 
@@ -127,22 +126,24 @@ pub struct LoadedPartitions<
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
 > {
-    loaded: RwLock<usize>,
-    partitions: [Arc<
-        RwLock<
-            Option<(
-                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-                PartitionGraph<A, Internal>,
-            )>,
+    loaded: TokioRwLock<usize>,
+    partitions: [TokioRwLock<
+        Arc<
+            StdRwLock<
+                Option<(
+                    Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                    PartitionGraph<A, Internal>,
+                )>,
+            >,
         >,
     >; MAX_LOADED],
-    load_state: [RwLock<Option<(usize, usize)>>; MAX_LOADED],
+    load_state: [TokioRwLock<Option<(usize, usize)>>; MAX_LOADED],
 
     // internal_graphs: [Option<Box<PartitionGraph<A, Internal>>>; MAX_LOADED],
 
     // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
     // partitions: [Option<Partition<A, B, PARTITION_CAP, VECTOR_CAP>>; MAX_LOADED],
-    hash_map: RwLock<HashMap<Uuid, usize>>,
+    hash_map: TokioRwLock<HashMap<Uuid, usize>>,
 }
 
 pub enum Error {
@@ -164,10 +165,10 @@ impl From<rancor::Error> for Error {
 }
 
 #[derive(Clone, Copy)]
-struct Internal(Uuid);
+pub struct Internal(Uuid);
 
 #[derive(Clone, Copy)]
-struct External(Uuid);
+pub struct External(Uuid);
 
 #[derive(Debug, Archive)]
 pub struct PartitionGraph<A: Field<A>, B>(Graph<Uuid, A, Undirected, DefaultIx>, PhantomData<B>);
@@ -185,11 +186,11 @@ impl<
 {
     pub fn new() -> Self {
         LoadedPartitions {
-            loaded: RwLock::new(0),
-            partitions: array::from_fn(|_| Arc::new(RwLock::new(None))),
-            load_state: array::from_fn(|_| RwLock::new(None)),
+            loaded: TokioRwLock::new(0),
+            partitions: array::from_fn(|_| TokioRwLock::new(Arc::new(StdRwLock::new(None)))),
+            load_state: array::from_fn(|_| TokioRwLock::new(None)),
 
-            hash_map: RwLock::new(HashMap::new()),
+            hash_map: TokioRwLock::new(HashMap::new()),
         }
     }
 
@@ -203,7 +204,7 @@ impl<
         [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
             DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
     {
-        if *self.loaded.read().unwrap() >= PARTITION_CAP {
+        if *self.loaded.read().await >= PARTITION_CAP {
             return Err(Error::NotEnoughSpace);
         }
 
@@ -213,10 +214,15 @@ impl<
             .iter()
             .enumerate()
             .filter(|(_index, partition)| match partition.try_read() {
-                Ok(partition) => match *partition {
-                    Some(_) => false,
-                    None => true,
-                },
+                Ok(partition) => {
+                    let Ok(partition) = (**partition).read() else {
+                        return false;
+                    };
+                    match *partition {
+                        Some(_) => false,
+                        None => true,
+                    }
+                }
                 Err(_err) => false,
             })
             .map(|(index, _partition)| index)
@@ -227,11 +233,9 @@ impl<
         };
 
         //get access to RwLock
-        let mut partition_block = self.partitions[i1].write().unwrap();
-        let mut partition_block = partition_block.as_mut();
-
-        let mut load_state = self.load_state[i1].write().unwrap();
-        let mut load_state = load_state.as_mut();
+        let partition_block = self.partitions[i1].write().await;
+        let load_state = self.load_state[i1].write().await;
+        let mut loaded = self.loaded.write().await;
 
         //load files
         let new_partition: Partition<A, B, PARTITION_CAP, VECTOR_CAP> = {
@@ -244,14 +248,15 @@ impl<
 
             from_bytes::<PartitionGraphSerial<A>, rancor::Error>(&bytes)?.into()
         };
-
         //assign values
-        partition_block.replace(&mut (new_partition, new_internal_graph));
-        load_state.replace(&mut (0usize, 0usize));
+        let partition_block = partition_block.write();
+        let mut partition_block = partition_block.unwrap();
+        partition_block.replace((new_partition, new_internal_graph));
 
-        let mut loaded = *self.loaded.write().unwrap();
+        let mut load_state = *load_state;
+        load_state.replace((0usize, 0usize));
 
-        loaded += 1;
+        *loaded += 1;
 
         Ok(())
     }
@@ -269,15 +274,18 @@ impl<
             >,
         >, // for<'a> rkyv::Serialize<Strategy<rkyv::ser::Serializer<AlignedVec, ArenaHandle<'a>, Share>, _>>
     {
-        let mut partition = self.partitions[index].write().unwrap();
-        let state = self.load_state[index].write().unwrap();
-        let mut hash_map = self.hash_map.write().unwrap();
-        let mut load_state = self.load_state[index].write().unwrap();
+        let partition_block = self.partitions[index].write().await;
+        let mut hash_map = self.hash_map.write().await;
+        let load_state = self.load_state[index].write().await;
+        let mut loaded = self.loaded.write().await;
+
         let id = {
             let (partition, graph) = {
                 let mut tmp_value = None;
 
-                mem::swap(&mut tmp_value, &mut partition);
+                let mut partition_block = partition_block.write().unwrap();
+
+                mem::swap(&mut tmp_value, &mut partition_block);
 
                 match tmp_value {
                     Some(value) => value,
@@ -287,6 +295,7 @@ impl<
                 }
             };
 
+            // serialize & save data
             {
                 let partition_serial: PartitionSerial<A> = partition.into();
                 let bytes = to_bytes::<rancor::Error>(&partition_serial)?;
@@ -308,18 +317,15 @@ impl<
                 .await?;
             }
 
+            let mut load_state = *load_state;
+            mem::replace(&mut load_state, None);
+
             partition.id
         };
-        {
-            let mut state = *state;
-
-            let _ = mem::replace(&mut state, None);
-        }
 
         hash_map.remove(&id);
 
-        let mut loaded = *self.loaded.write().unwrap();
-        loaded -= 1;
+        *loaded -= 1;
 
         Ok(())
     }
@@ -328,58 +334,54 @@ impl<
         &mut self,
         id: Uuid,
         tx: &mut Sender<(
-            Arc<RwLock<Option<(
-                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-                PartitionGraph<A, Internal>,
-            )>>>,
-            Arc<(
-                Condvar,
-                Mutex<bool>
-            )>
+            Arc<
+                StdRwLock<
+                    Option<(
+                        Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                        PartitionGraph<A, Internal>,
+                    )>,
+                >,
+            >,
+            Arc<(Condvar, Mutex<bool>)>,
         )>,
     ) -> Result<(), ()> {
-
         let index = {
-            let hash_map = self.hash_map.read().unwrap();
+            let hash_map = self.hash_map.read().await;
 
             match hash_map.get(&id) {
                 Some(index) => *index,
                 None => todo!(),
             }
         };
-        let mut use_count = self.load_state[index].write().unwrap();
+        let mut use_count = self.load_state[index].write().await;
+
         if let None = *use_count {
+            // invalid state
             todo!()
         };
-        let pair_1 = Arc::new(
-            (
-                Condvar::new(),
-                Mutex::new(false)
-            )
-        );
+
+        let pair_1 = Arc::new((Condvar::new(), Mutex::new(false)));
 
         let pair_2 = Arc::clone(&pair_1);
         {
-            let _ = tx.send((
-                self.partitions[index].clone(),
-                pair_2
-            ));
+            let _ = tx.send((self.partitions[index].read().await.clone(), pair_2));
         }
 
         let (cvar, lock) = &*pair_1;
 
         let started = lock.lock().unwrap();
         drop(cvar.wait(started));
-    
+
         if let Some(use_count) = use_count.as_mut() {
-            use_count.1 = use_count.1+1;
+            use_count.1 = use_count.1 + 1;
         };
 
         Ok(())
     }
 
     pub fn least_used(&self) -> Option<usize> {
-        let mut iter = self.load_state
+        let mut iter = self
+            .load_state
             .iter()
             .map(|x| x.try_read())
             .enumerate()
@@ -401,9 +403,60 @@ impl<
                     } else {
                         (acc_index, (acc_prev, acc_cur))
                     }
-                }
-            ).0
+                },
+            )
+            .0,
         )
+    }
+
+    pub async fn de_increment(&mut self) {
+        for x in self.load_state.iter_mut() {
+            let x = x.write().await;
+
+            if x.is_none() {
+                continue;
+            }
+
+            let mut x = x.unwrap();
+
+            let replace = (x.1, 0usize);
+            let _ = mem::replace(&mut x, replace);
+        }
+    }
+
+    pub async fn insert_partition(
+        &mut self,
+        new_partition: Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+        new_partition_graph: PartitionGraph<A, Internal>,
+    ) -> Result<(), Error> {
+        if *self.loaded.read().await >= PARTITION_CAP {
+            return Err(Error::NotEnoughSpace);
+        }
+
+        let index_load_state_pair = self
+            .load_state
+            .iter()
+            .enumerate()
+            .map(|(index, state)| (index, state.try_read()))
+            .filter(|(_index, state)| state.is_ok())
+            .map(|(index, state)| (index, state.unwrap()))
+            .filter(|(_index, state)| state.is_none())
+            .map(|(index, _state)| index)
+            .next();
+
+        let Some(index) = index_load_state_pair else {
+            return Err(Error::AllLocksInUse);
+        };
+
+        let partition_block = self.partitions[index].write().await;
+        let mut load_state = self.load_state[index].write().await;
+
+        let mut partition_block = (*partition_block).write().unwrap();
+        partition_block.replace((new_partition, new_partition_graph));
+
+        (*load_state).replace((0usize, 0usize));
+
+        Ok(())
     }
 }
 
