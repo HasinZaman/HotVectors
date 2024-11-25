@@ -1,6 +1,6 @@
-use std::sync::mpsc::{Receiver, Sender};
+use std::{marker::PhantomData, sync::mpsc::{Receiver, Sender}};
 
-use partition::{External, Internal, LoadedPartitions, Partition, PartitionGraph};
+use partition::{External, Internal, LoadedPartitions, Partition, PartitionGraph, VectorEntry};
 use tokio::runtime;
 use uuid::Uuid;
 
@@ -9,7 +9,45 @@ use crate::vector::{Extremes, Field, VectorSpace};
 mod partition;
 mod serialization;
 
-fn db_loop<
+pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
+    // transaction commands
+    StartTransaction(Uuid),
+    EndTransaction(Uuid),
+    UndoTransaction(Uuid),
+
+    // Write
+    InsertVector{
+        vector: B,
+        transaction_id: Option<Uuid>
+    },
+
+    // projections
+    GetIds{
+        transaction_id: Option<Uuid>
+    },
+    GetVectors {
+        transaction_id: Option<Uuid>
+    },
+
+    // Filters
+    Knn {
+        transaction_id: Option<Uuid>
+    },
+    SelectedUUID {
+        transaction_id: Option<Uuid>
+    },
+
+    PhantomData(PhantomData<A>)
+}
+
+pub struct ChainedCmd<A: Field<A>, B: VectorSpace<A> + Sized>(Vec<AtomicCmd<A, B>>);
+
+pub enum Cmd<A: Field<A>, B: VectorSpace<A> + Sized> {
+    Atomic(AtomicCmd<A, B>),
+    Chained(ChainedCmd<A, B>)
+}
+
+pub fn db_loop<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy,
     const PARTITION_CAP: usize,
@@ -18,7 +56,7 @@ fn db_loop<
 >(
     loaded_partitions: LoadedPartitions<A, B, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>,
     external_graph: PartitionGraph<A, External>,
-    cmd_input: Receiver<Sender<u32>>,
+    cmd_input: Receiver<Sender<Cmd<A, B>>>,
 ) -> ! {
     // initialize internal graphs
     // initialize locks
@@ -38,9 +76,11 @@ fn db_loop<
     //     .unwrap();
     // if
     main_rt.block_on(async {
+        let tmp = cmd_input.try_recv();
         // check if any new cmds
 
         // create new action
+        //  -> start transaction
         //  -> read
         //      -> knn
         //      -> clusters
