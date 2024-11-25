@@ -22,7 +22,7 @@ impl<
         const VECTOR_CAP: usize,
     > From<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> for PartitionSerial<A>
 where
-    VectorEntry<A, B, VECTOR_CAP>: Into<VectorEntrySerial<A>>,
+    VectorEntry<A, B>: Into<VectorEntrySerial<A>>,
 {
     fn from(value: Partition<A, B, PARTITION_CAP, VECTOR_CAP>) -> Self {
         PartitionSerial {
@@ -45,13 +45,13 @@ impl<
         const VECTOR_CAP: usize,
     > From<PartitionSerial<A>> for Partition<A, B, PARTITION_CAP, VECTOR_CAP>
 where
-    VectorEntrySerial<A>: Into<VectorEntry<A, B, VECTOR_CAP>>,
+    VectorEntrySerial<A>: Into<VectorEntry<A, B>>,
 {
     fn from(value: PartitionSerial<A>) -> Self {
         let mut iter = value
             .vectors
             .iter()
-            .map(|x| Into::<VectorEntry<A, B, VECTOR_CAP>>::into(x.clone())); //TODO!() derive from a reference
+            .map(|x| Into::<VectorEntry<A, B>>::into(x.clone())); //TODO!() derive from a reference
 
         Partition {
             size: value.vectors.len(),
@@ -71,10 +71,9 @@ pub struct VectorEntrySerial<A: Clone + Copy> {
 impl<
         A: Clone + Copy + Field<A>,
         B: Clone + Copy + Into<VectorSerial<A>> + VectorSpace<A>,
-        const CAP: usize,
-    > From<VectorEntry<A, B, CAP>> for VectorEntrySerial<A>
+    > From<VectorEntry<A, B>> for VectorEntrySerial<A>
 {
-    fn from(value: VectorEntry<A, B, CAP>) -> Self {
+    fn from(value: VectorEntry<A, B>) -> Self {
         VectorEntrySerial {
             vector: value.vector.into(),
             id: value.id.to_string(),
@@ -84,8 +83,7 @@ impl<
 impl<
         A: Clone + Copy + Field<A>,
         B: PartialEq + Clone + Copy + From<VectorSerial<A>> + VectorSpace<A>,
-        const CAP: usize,
-    > From<VectorEntrySerial<A>> for VectorEntry<A, B, CAP>
+    > From<VectorEntrySerial<A>> for VectorEntry<A, B>
 {
     fn from(value: VectorEntrySerial<A>) -> Self {
         VectorEntry::new(value.vector.into(), &value.id)

@@ -401,7 +401,7 @@ pub struct Partition<
 > {
     pub size: usize,
 
-    pub vectors: [Option<VectorEntry<A, B, VECTOR_CAP>>; PARTITION_CAP],
+    pub vectors: [Option<VectorEntry<A, B>>; PARTITION_CAP],
     pub centroid: B,
 
     pub id: Uuid,
@@ -426,7 +426,7 @@ impl<
         }
     }
 
-    pub fn add(&mut self, value: VectorEntry<A, B, VECTOR_CAP>) -> Result<(), PartitionErr> {
+    pub fn add(&mut self, value: VectorEntry<A, B>) -> Result<(), PartitionErr> {
         if self.size + 1 >= PARTITION_CAP {
             return Err(PartitionErr::Overflow);
         };
@@ -442,7 +442,7 @@ impl<
     pub fn remove_by_vector(
         &mut self,
         value: B,
-    ) -> Result<VectorEntry<A, B, VECTOR_CAP>, PartitionErr>
+    ) -> Result<VectorEntry<A, B>, PartitionErr>
     where
         B: PartialEq,
     {
@@ -490,7 +490,7 @@ impl<
     pub fn remove_by_id(
         &mut self,
         id: Uuid,
-    ) -> Result<VectorEntry<A, B, VECTOR_CAP>, PartitionErr> {
+    ) -> Result<VectorEntry<A, B>, PartitionErr> {
         if self.size == 0 {
             return Err(PartitionErr::PartitionEmpty);
         }
@@ -533,7 +533,7 @@ impl<
         Ok(removed_vec.unwrap())
     }
 
-    pub fn pop(&mut self) -> Result<VectorEntry<A, B, VECTOR_CAP>, PartitionErr> {
+    pub fn pop(&mut self) -> Result<VectorEntry<A, B>, PartitionErr> {
         if self.size == 0 {
             return Err(PartitionErr::PartitionEmpty);
         }
@@ -561,7 +561,7 @@ impl<
 
     pub fn remove_by_func(
         &mut self,
-        func: fn(&VectorEntry<A, B, VECTOR_CAP>) -> bool,
+        func: fn(&VectorEntry<A, B>) -> bool,
     ) -> Result<(), PartitionErr> {
         if self.size == 0 {
             return Ok(());
@@ -611,7 +611,7 @@ impl<
         const VECTOR_CAP: usize,
     > Index<usize> for Partition<A, B, PARTITION_CAP, VECTOR_CAP>
 {
-    type Output = Option<VectorEntry<A, B, VECTOR_CAP>>;
+    type Output = Option<VectorEntry<A, B>>;
 
     fn index(&self, index: usize) -> &Self::Output {
         assert!(index >= self.size);
@@ -621,14 +621,14 @@ impl<
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct VectorEntry<A: Field<A>, B: VectorSpace<A> + Sized, const CAP: usize> {
+pub struct VectorEntry<A: Field<A>, B: VectorSpace<A> + Sized> {
     pub vector: B,
     pub id: Uuid,
 
     _phantom_data: PhantomData<A>,
 }
 
-impl<A: Field<A>, B: VectorSpace<A> + Sized, const CAP: usize> VectorEntry<A, B, CAP> {
+impl<A: Field<A>, B: VectorSpace<A> + Sized> VectorEntry<A, B> {
     pub fn new(vector: B, id: &str) -> Self {
         Self {
             vector: vector,
