@@ -1,4 +1,4 @@
-use std::{array, collections::HashMap, marker::PhantomData, str::FromStr};
+use std::{array, collections::HashMap, str::FromStr};
 
 use petgraph::{Graph, Undirected};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
-use super::{Internal, Partition, PartitionGraph, VectorEntry};
+use super::partition::{Internal, Partition, PartitionGraph, VectorEntry};
 
 #[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {
@@ -88,11 +88,12 @@ impl<
     > From<VectorEntrySerial<A>> for VectorEntry<A, B, CAP>
 {
     fn from(value: VectorEntrySerial<A>) -> Self {
-        VectorEntry {
-            vector: value.vector.into(),
-            id: Uuid::from_str(&value.id).unwrap(),
-            _phantom_data: PhantomData,
-        }
+        VectorEntry::new(value.vector.into(), &value.id)
+        //  {
+        //     vector: value.vector.into(),
+        //     id: Uuid::from_str(&value.id).unwrap(),
+        //     _phantom_data: PhantomData,
+        // }
     }
 }
 
@@ -150,6 +151,6 @@ impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for PartitionGrap
                 graph.add_edge(id1, id2, *weight);
             });
 
-        PartitionGraph(graph, PhantomData::<Internal>)
+        PartitionGraph::new(graph)
     }
 }
