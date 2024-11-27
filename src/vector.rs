@@ -26,6 +26,15 @@ pub trait VectorSpace<A: Field<A>> {
     fn dot(lhs: &Self, rhs: &Self) -> A;
 
     fn scalar_mult(lhs: &Self, scalar: &A) -> Self;
+
+    fn dist(lhs: &Self, rhs: &Self) -> A
+    where
+        Self: Sized,
+    {
+        let dist: Self = Self::sub(lhs, rhs);
+
+        Self::dot(&dist, &dist)
+    }
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]

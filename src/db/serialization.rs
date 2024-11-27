@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
-use super::partition::{Internal, Partition, PartitionGraph, VectorEntry};
+use super::partition::{IntraPartitionGraph, Partition, VectorEntry};
 
 #[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {
@@ -68,10 +68,8 @@ pub struct VectorEntrySerial<A: Clone + Copy> {
     id: String,
 }
 
-impl<
-        A: Clone + Copy + Field<A>,
-        B: Clone + Copy + Into<VectorSerial<A>> + VectorSpace<A>,
-    > From<VectorEntry<A, B>> for VectorEntrySerial<A>
+impl<A: Clone + Copy + Field<A>, B: Clone + Copy + Into<VectorSerial<A>> + VectorSpace<A>>
+    From<VectorEntry<A, B>> for VectorEntrySerial<A>
 {
     fn from(value: VectorEntry<A, B>) -> Self {
         VectorEntrySerial {
@@ -86,7 +84,7 @@ impl<
     > From<VectorEntrySerial<A>> for VectorEntry<A, B>
 {
     fn from(value: VectorEntrySerial<A>) -> Self {
-        VectorEntry::new(value.vector.into(), &value.id)
+        VectorEntry::from_str_id(value.vector.into(), &value.id)
         //  {
         //     vector: value.vector.into(),
         //     id: Uuid::from_str(&value.id).unwrap(),
@@ -101,8 +99,8 @@ pub struct PartitionGraphSerial<A> {
     connections: Vec<(usize, usize, A)>,
 }
 
-impl<A: Field<A> + Clone + Copy> From<PartitionGraph<A, Internal>> for PartitionGraphSerial<A> {
-    fn from(value: PartitionGraph<A, Internal>) -> Self {
+impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for PartitionGraphSerial<A> {
+    fn from(value: IntraPartitionGraph<A>) -> Self {
         PartitionGraphSerial {
             ids: value
                 .0
@@ -120,7 +118,7 @@ impl<A: Field<A> + Clone + Copy> From<PartitionGraph<A, Internal>> for Partition
     }
 }
 
-impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for PartitionGraph<A, Internal> {
+impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for IntraPartitionGraph<A> {
     fn from(value: PartitionGraphSerial<A>) -> Self {
         let mut graph: Graph<Uuid, A, Undirected> = Graph::<Uuid, A, Undirected>::new_undirected();
         let mut uuid_to_index = HashMap::new();
@@ -149,6 +147,6 @@ impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for PartitionGrap
                 graph.add_edge(id1, id2, *weight);
             });
 
-        PartitionGraph::new(graph)
+        IntraPartitionGraph::new(graph)
     }
 }

@@ -3,6 +3,9 @@ name = "HotVectors"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+gpu_processing = []
+
 [dependencies]
 uuid = {version = "*", features = ["v4", "serde"]}
 rkyv = {version = "*", features = ["bytecheck", "alloc"]}

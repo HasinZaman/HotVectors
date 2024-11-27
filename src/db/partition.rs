@@ -66,7 +66,7 @@ pub struct LoadedPartitions<
             StdRwLock<
                 Option<(
                     Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-                    PartitionGraph<A, Internal>,
+                    IntraPartitionGraph<A>,
                 )>,
             >,
         >,
@@ -80,21 +80,15 @@ pub struct LoadedPartitions<
     hash_map: TokioRwLock<HashMap<Uuid, usize>>,
 }
 
-#[derive(Clone, Copy)]
-pub struct Internal(Uuid);
-
-#[derive(Clone, Copy)]
-pub struct External(Uuid);
+#[derive(Debug, Default, Archive)]
+pub struct InterPartitionGraph<A: Field<A>>(Graph<Uuid, (A, Uuid, Uuid), Undirected, DefaultIx>);
 
 #[derive(Debug, Archive)]
-pub struct PartitionGraph<A: Field<A>, B>(
-    pub Graph<Uuid, A, Undirected, DefaultIx>,
-    PhantomData<B>,
-);
+pub struct IntraPartitionGraph<A: Field<A>>(pub Graph<Uuid, A, Undirected, DefaultIx>);
 
-impl<A: Field<A>, B> PartitionGraph<A, B> {
+impl<A: Field<A>> IntraPartitionGraph<A> {
     pub fn new(graph: Graph<Uuid, A, Undirected, DefaultIx>) -> Self {
-        PartitionGraph(graph, PhantomData::<B>)
+        IntraPartitionGraph(graph)
     }
 }
 
@@ -119,7 +113,7 @@ impl<
         }
     }
 
-    pub async fn load(&mut self, id: Uuid) -> Result<(), Error>
+    pub async fn load(&mut self, id: &Uuid) -> Result<(), Error>
     where
         A: Archive,
         for<'a> <A as Archive>::Archived:
@@ -168,7 +162,7 @@ impl<
 
             from_bytes::<PartitionSerial<A>, rancor::Error>(&bytes)?.into()
         };
-        let new_internal_graph: PartitionGraph<A, Internal> = {
+        let new_internal_graph: IntraPartitionGraph<A> = {
             let bytes = tokio::fs::read(&format!("{SOURCE_DIR}//{id}.graph")).await?;
 
             from_bytes::<PartitionGraphSerial<A>, rancor::Error>(&bytes)?.into()
@@ -257,25 +251,35 @@ impl<
 
     pub async fn access(
         &mut self,
-        id: Uuid,
-        tx: &mut Sender<(
-            Arc<
-                StdRwLock<
-                    Option<(
-                        Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-                        PartitionGraph<A, Internal>,
-                    )>,
-                >,
+        id: &Uuid,
+        // tx: &mut Sender<(
+        //     Arc<
+        //         StdRwLock<
+        //             Option<(
+        //                 Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+        //                 IntraPartitionGraph<A>,
+        //             )>,
+        //         >,
+        //     >,
+        //     Arc<(Condvar, Mutex<bool>)>,
+        // )>,
+    ) -> Result<
+        Arc<
+            StdRwLock<
+                Option<(
+                    Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                    IntraPartitionGraph<A>,
+                )>,
             >,
-            Arc<(Condvar, Mutex<bool>)>,
-        )>,
-    ) -> Result<(), ()> {
+        >,
+        Error,
+    > {
         let index = {
             let hash_map = self.hash_map.read().await;
 
             match hash_map.get(&id) {
                 Some(index) => *index,
-                None => todo!(),
+                None => return Err(Error::NotInMemory),
             }
         };
         let mut use_count = self.load_state[index].write().await;
@@ -285,23 +289,11 @@ impl<
             todo!()
         };
 
-        let pair_1 = Arc::new((Condvar::new(), Mutex::new(false)));
-
-        let pair_2 = Arc::clone(&pair_1);
-        {
-            let _ = tx.send((self.partitions[index].read().await.clone(), pair_2));
-        }
-
-        let (cvar, lock) = &*pair_1;
-
-        let started = lock.lock().unwrap();
-        drop(cvar.wait(started));
-
         if let Some(use_count) = use_count.as_mut() {
             use_count.1 = use_count.1 + 1;
         };
 
-        Ok(())
+        Ok(self.partitions[index].read().await.clone())
     }
 
     pub fn least_used(&self) -> Option<usize> {
@@ -352,7 +344,7 @@ impl<
     pub async fn insert_partition(
         &mut self,
         new_partition: Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-        new_partition_graph: PartitionGraph<A, Internal>,
+        new_partition_graph: IntraPartitionGraph<A>,
     ) -> Result<(), Error> {
         if *self.loaded.read().await >= PARTITION_CAP {
             return Err(Error::NotEnoughSpace);
@@ -439,10 +431,7 @@ impl<
         Ok(())
     }
 
-    pub fn remove_by_vector(
-        &mut self,
-        value: B,
-    ) -> Result<VectorEntry<A, B>, PartitionErr>
+    pub fn remove_by_vector(&mut self, value: B) -> Result<VectorEntry<A, B>, PartitionErr>
     where
         B: PartialEq,
     {
@@ -487,10 +476,7 @@ impl<
 
         Ok(removed_vec.unwrap())
     }
-    pub fn remove_by_id(
-        &mut self,
-        id: Uuid,
-    ) -> Result<VectorEntry<A, B>, PartitionErr> {
+    pub fn remove_by_id(&mut self, id: Uuid) -> Result<VectorEntry<A, B>, PartitionErr> {
         if self.size == 0 {
             return Err(PartitionErr::PartitionEmpty);
         }
@@ -572,6 +558,7 @@ impl<
 
     pub fn split(&mut self) -> Result<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionErr>
     where
+        A: PartialOrd,
         B: Extremes,
     {
         if self.size == 0 {
@@ -582,7 +569,54 @@ impl<
 
         new_partition.add(self.pop().unwrap()).unwrap();
 
+        if cfg!(feature = "gpu_processing") {
+            todo!()
+        } else {
+            let traitors = (0..self.size)
+                .map(|i| {
+                    (
+                        i,
+                        B::dist(&self.vectors[i].unwrap().vector, &self.centroid),
+                        B::dist(&self.vectors[i].unwrap().vector, &new_partition.centroid),
+                    )
+                })
+                .filter(|(_i, old_dist, new_dist)| new_dist < old_dist)
+                .map(|(i, _old_dist, _new_dist)| i)
+                .collect::<Vec<usize>>();
+
+            traitors
+                .iter()
+                .enumerate()
+                .map(|(i1, i2)| (i1, i2 + 1))
+                .for_each(|(i1, i2)| {
+                    mem::swap(&mut self.vectors[i1], &mut new_partition.vectors[i2]);
+                });
+            new_partition.size = 1 + traitors.len();
+
+            self.fix_holes();
+
+            self.size = self.size - traitors.len();
+        }
+
         Ok(new_partition)
+    }
+
+    fn fix_holes(&mut self) {
+        for i1 in 0..self.size {
+            if self.vectors[i1].is_some() {
+                continue;
+            }
+
+            let mut next_pos = i1;
+
+            while self.vectors[next_pos].is_none() && next_pos < self.size {
+                next_pos += 1;
+            }
+
+            if next_pos >= self.size {
+                break;
+            }
+        }
     }
 
     pub fn merge(&mut self, other: Self) -> Result<(), PartitionErr> {
@@ -629,10 +663,17 @@ pub struct VectorEntry<A: Field<A>, B: VectorSpace<A> + Sized> {
 }
 
 impl<A: Field<A>, B: VectorSpace<A> + Sized> VectorEntry<A, B> {
-    pub fn new(vector: B, id: &str) -> Self {
+    pub fn from_str_id(vector: B, id: &str) -> Self {
         Self {
             vector: vector,
             id: Uuid::from_str(id).unwrap(),
+            _phantom_data: PhantomData,
+        }
+    }
+    pub fn from_uuid(vector: B, id: Uuid) -> Self {
+        Self {
+            vector: vector,
+            id: id,
             _phantom_data: PhantomData,
         }
     }
