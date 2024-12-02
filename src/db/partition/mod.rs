@@ -1,9 +1,9 @@
 use std::{
     array,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     mem,
-    ops::Index,
+    ops::{Deref, Index},
     str::FromStr,
     sync::{mpsc::Sender, Arc, Condvar, Mutex},
 };
@@ -11,7 +11,14 @@ use std::{
 use std::sync::RwLock as StdRwLock;
 
 use super::serialization::{PartitionGraphSerial, PartitionSerial};
-use petgraph::{csr::DefaultIx, Graph, Undirected};
+use petgraph::{
+    csr::DefaultIx,
+    graph::{EdgeIndex, NodeIndex},
+    prelude::StableGraph,
+    stable_graph::Edges,
+    visit::{EdgeRef, NodeRef},
+    Graph, Undirected,
+};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -27,6 +34,8 @@ use tokio::sync::RwLock as TokioRwLock;
 use uuid::Uuid;
 
 use crate::vector::{Extremes, Field, VectorSerial, VectorSpace};
+
+pub mod add;
 
 pub enum Error {
     FileDoesNotExist,
@@ -80,15 +89,43 @@ pub struct LoadedPartitions<
     hash_map: TokioRwLock<HashMap<Uuid, usize>>,
 }
 
+#[derive(Debug, Default, Archive, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct VectorId(Uuid);
+
+impl Deref for VectorId {
+    type Target = Uuid;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Default, Archive, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct PartitionId(Uuid);
+
+impl Deref for PartitionId {
+    type Target = Uuid;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Default, Archive)]
-pub struct InterPartitionGraph<A: Field<A>>(Graph<Uuid, (A, Uuid, Uuid), Undirected, DefaultIx>);
+pub struct InterPartitionGraph<A: Field<A>>(
+    pub StableGraph<PartitionId, (A, VectorId, VectorId), Undirected, DefaultIx>,
+    pub HashMap<PartitionId, NodeIndex<DefaultIx>>,
+);
 
 #[derive(Debug, Archive)]
-pub struct IntraPartitionGraph<A: Field<A>>(pub Graph<Uuid, A, Undirected, DefaultIx>);
+pub struct IntraPartitionGraph<A: Field<A>>(
+    pub StableGraph<VectorId, A, Undirected, DefaultIx>,
+    pub HashMap<VectorId, NodeIndex<DefaultIx>>,
+);
 
-impl<A: Field<A>> IntraPartitionGraph<A> {
-    pub fn new(graph: Graph<Uuid, A, Undirected, DefaultIx>) -> Self {
-        IntraPartitionGraph(graph)
+impl<A: Field<A>> Default for IntraPartitionGraph<A> {
+    fn default() -> Self {
+        Self(Default::default(), Default::default())
     }
 }
 
@@ -418,7 +455,18 @@ impl<
         }
     }
 
-    pub fn add(&mut self, value: VectorEntry<A, B>) -> Result<(), PartitionErr> {
+    pub fn add(
+        &mut self,
+        value: VectorEntry<A, B>,
+        intra_graph: &mut IntraPartitionGraph<A>,
+
+        inter_graph: &mut InterPartitionGraph<A>,
+
+        neighbors: &[(&Self, &mut IntraPartitionGraph<A>)],
+    ) -> Result<(), PartitionErr>
+    where
+        A: PartialOrd + Ord,
+    {
         if self.size + 1 >= PARTITION_CAP {
             return Err(PartitionErr::Overflow);
         };
@@ -427,6 +475,93 @@ impl<
         self.size += 1;
 
         self.centroid = B::add(&self.centroid, &value.vector);
+
+        // insert node into a minimum spanning tree
+        {
+            //need to get distance of all neighbor vectors
+            let idx = intra_graph.0.add_node(value.id);
+            intra_graph.1.insert(value.id, idx);
+
+            let partition_splits = [self.size]
+                .iter()
+                .chain(neighbors.iter().map(|x| &x.0.size))
+                .collect::<Vec<&usize>>();
+
+            let dist = self
+                .vectors
+                .iter()
+                .chain(neighbors.iter().map(|x| x.0.vectors.iter()).flatten())
+                .filter_map(|x| *x)
+                .enumerate()
+                .map(|(index, x)| (x.id, (index, B::dist(&x.vector, &value.vector))))
+                .collect::<HashMap<Uuid, (usize, A)>>();
+
+            // find closet inserted vector
+            let (id, index, _dist) = {
+                let Some((id, (index, _dist))) = dist
+                    .iter()
+                    // .enumerate()
+                    .min_by(|(_, (_, x1)), (_, (_, x2))| x1.cmp(x2))
+                else {
+                    todo!()
+                };
+
+                (*id, *index, *_dist)
+            };
+
+            // determine search area
+
+            // two list
+            //  -> internal nodes
+            //      -> new intra-graph edge
+            //      -> destroy intra-graph edge
+            //  -> external nodes
+            //      -> new inter-graph edge
+            //      -> destroy foreign intra-graph edge
+            //      -> destroy inter-graph edge
+
+            todo!();
+            if &index < partition_splits[0] {
+                let start_index = intra_graph.1[&id];
+
+                let neighbors = intra_graph
+                    .0
+                    .edges(start_index)
+                    .map(|x| [(x.target(), x.weight()), (x.source(), x.weight())])
+                    .flatten()
+                    .filter(|(x, _)| x != &start_index)
+                    .map(|(x, y)| (*intra_graph.0.node_weight(x).unwrap(), *y))
+                    .collect::<HashMap<Uuid, A>>();
+
+                let replace_edges = dist
+                    .iter()
+                    .filter(|(id, _)| neighbors.contains_key(id))
+                    .filter(|(id, (_, x))| neighbors[id] > *x)
+                    .filter_map(|(id, (_, dist))| {
+                        intra_graph
+                            .0
+                            .find_edge(intra_graph.1[&id], start_index)
+                            .map(|edge| (*id, edge, *dist))
+                    })
+                    .collect::<Vec<(Uuid, EdgeIndex, A)>>();
+
+                replace_edges
+                    .into_iter()
+                    .for_each(|(target, remove_edge, dist)| {
+                        intra_graph.0.add_edge(intra_graph.1[&target], idx, dist);
+                        intra_graph.0.remove_edge(remove_edge);
+                    });
+
+                intra_graph.0.add_edge(idx, start_index, _dist);
+
+                //check if any of the replaced affected vertex are
+                todo!()
+            } else {
+            }
+
+            // if index in (0, partition_splits[0]) -> home shit
+            // if index (partition_splits[0], partition_splits[1]) -> closet node in another partition
+        }
 
         Ok(())
     }
@@ -556,9 +691,19 @@ impl<
         todo!();
     }
 
-    pub fn split(&mut self) -> Result<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionErr>
+    pub fn split(
+        &mut self,
+        graph_1: &mut IntraPartitionGraph<A>,
+        inter_graph: &mut InterPartitionGraph<A>,
+    ) -> Result<
+        (
+            Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+            IntraPartitionGraph<A>,
+        ),
+        PartitionErr,
+    >
     where
-        A: PartialOrd,
+        A: PartialOrd + Ord,
         B: Extremes,
     {
         if self.size == 0 {
@@ -566,8 +711,10 @@ impl<
         }
 
         let mut new_partition = Partition::new();
+        let mut new_graph = IntraPartitionGraph::default();
 
-        new_partition.add(self.pop().unwrap()).unwrap();
+        todo!();
+        let _ = new_partition.add(self.pop().unwrap(), &mut new_graph);
 
         if cfg!(feature = "gpu_processing") {
             todo!()
@@ -584,6 +731,9 @@ impl<
                 .map(|(i, _old_dist, _new_dist)| i)
                 .collect::<Vec<usize>>();
 
+            // move values from graph old -> new
+            todo!();
+
             traitors
                 .iter()
                 .enumerate()
@@ -598,7 +748,7 @@ impl<
             self.size = self.size - traitors.len();
         }
 
-        Ok(new_partition)
+        Ok((new_partition, new_graph))
     }
 
     fn fix_holes(&mut self) {
