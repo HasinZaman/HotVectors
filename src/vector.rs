@@ -1,6 +1,6 @@
 use std::{array, fmt::Debug};
 
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{seal::Seal, Archive, Deserialize, Serialize};
 
 pub trait Extremes {
     fn min() -> Self;
@@ -16,6 +16,7 @@ pub trait Field<A> {
     fn div(lhs: &Self, rhs: &Self) -> Self;
     fn additive_identity() -> Self;
     fn multiplicative_identity() -> Self;
+    fn from_usize(x: usize) -> Self;
 }
 
 pub trait VectorSpace<A: Field<A>> {
@@ -146,6 +147,10 @@ macro_rules! extremes_int {
             fn multiplicative_identity() -> Self {
                 1
             }
+
+            fn from_usize(x: usize) -> Self {
+                x as $head
+            }
         }
     };
 }
@@ -200,6 +205,10 @@ macro_rules! extremes_float {
 
             fn multiplicative_identity() -> Self {
                 1.
+            }
+
+            fn from_usize(x: usize) -> Self {
+                x as $head
             }
         }
     };

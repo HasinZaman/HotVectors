@@ -102,18 +102,19 @@ pub struct PartitionGraphSerial<A> {
 impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for PartitionGraphSerial<A> {
     fn from(value: IntraPartitionGraph<A>) -> Self {
         PartitionGraphSerial {
-            ids: value
-                .0
-                .raw_nodes()
-                .iter()
-                .map(|node| node.weight.to_string())
-                .collect::<Vec<String>>(),
-            connections: value
-                .0
-                .raw_edges()
-                .iter()
-                .map(|edge| (edge.source().index(), edge.target().index(), edge.weight))
-                .collect::<Vec<(usize, usize, A)>>(),
+            ids: todo!(),
+            connections: todo!(), // ids: value
+                                  //     .0
+                                  //     .raw_nodes()
+                                  //     .iter()
+                                  //     .map(|node| node.weight.to_string())
+                                  //     .collect::<Vec<String>>(),
+                                  // connections: value
+                                  //     .0
+                                  //     .raw_edges()
+                                  //     .iter()
+                                  //     .map(|edge| (edge.source().index(), edge.target().index(), edge.weight))
+                                  //     .collect::<Vec<(usize, usize, A)>>(),
         }
     }
 }
@@ -147,6 +148,7 @@ impl<A: Field<A> + Clone + Copy> From<PartitionGraphSerial<A>> for IntraPartitio
                 graph.add_edge(id1, id2, *weight);
             });
 
-        IntraPartitionGraph::new(graph)
+        todo!()
+        // IntraPartitionGraph(todo!(), todo!())
     }
 }
