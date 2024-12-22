@@ -696,18 +696,13 @@ impl<
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = &VectorEntry<A, B>> + '_> {
-        Box::new(
-            self.vectors
-                .iter()
-                .take(self.size)
-                .map(vec_unwrap)
-        )
+        Box::new(self.vectors.iter().take(self.size).map(vec_unwrap))
     }
-
-
 }
 
-fn vec_unwrap<'a, A: Field<A>, B: VectorSpace<A>>(vector: &'a Option<VectorEntry<A, B>>) -> &'a VectorEntry<A, B> {
+fn vec_unwrap<'a, A: Field<A>, B: VectorSpace<A>>(
+    vector: &'a Option<VectorEntry<A, B>>,
+) -> &'a VectorEntry<A, B> {
     match vector {
         Some(vector) => vector,
         None => panic!(),
