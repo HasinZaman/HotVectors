@@ -358,8 +358,7 @@ mod test {
         let mut partition = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph = IntraPartitionGraph::new();
 
-        let index = inter_graph.0.add_node(PartitionId(partition.id));
-        inter_graph.1.insert(PartitionId(partition.id), index);
+        inter_graph.add_node(PartitionId(partition.id));
 
         // Insert into partition
         let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
@@ -397,8 +396,7 @@ mod test {
         let mut partition = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph = IntraPartitionGraph::new();
 
-        let index = inter_graph.0.add_node(PartitionId(partition.id));
-        inter_graph.1.insert(PartitionId(partition.id), index);
+        inter_graph.add_node(PartitionId(partition.id));
 
         // Insert into partition
         // TODO - replace with random inserts and check MST
@@ -519,13 +517,11 @@ mod test {
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_1 = IntraPartitionGraph::new();
-        let index = inter_graph.0.add_node(PartitionId(partition_1.id));
-        inter_graph.1.insert(PartitionId(partition_1.id), index);
-
+        inter_graph.add_node(PartitionId(partition_1.id));
+        
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_2 = IntraPartitionGraph::new();
-        let index = inter_graph.0.add_node(PartitionId(partition_2.id));
-        inter_graph.1.insert(PartitionId(partition_2.id), index);
+        inter_graph.add_node(PartitionId(partition_2.id));
 
         // Insert into partition
         let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
@@ -644,13 +640,11 @@ mod test {
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_1 = IntraPartitionGraph::new();
-        let index = inter_graph.0.add_node(PartitionId(partition_1.id));
-        inter_graph.1.insert(PartitionId(partition_1.id), index);
+        inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_2 = IntraPartitionGraph::new();
-        let index = inter_graph.0.add_node(PartitionId(partition_2.id));
-        inter_graph.1.insert(PartitionId(partition_2.id), index);
+        inter_graph.add_node(PartitionId(partition_2.id));
 
         // Insert into partition
         {
