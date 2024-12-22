@@ -95,10 +95,7 @@ where
                 todo!()
             } else {
                 target
-                    .vectors
                     .iter()
-                    .take(target.size)
-                    .map(|x| x.unwrap())
                     .map(|x| (target.id, x))
                     .chain(
                         neighbors
@@ -106,10 +103,7 @@ where
                             .map(|partition| {
                                 partition
                                     .0
-                                    .vectors
                                     .iter()
-                                    .take(partition.0.size)
-                                    .map(|x| x.unwrap())
                                     .map(|vec| (partition.0.id, vec))
                             })
                             .flatten(),
@@ -588,10 +582,7 @@ mod test {
                 let vec_1 = {
                     match intra_graph_1.1.contains_key(&vec_id_1.1) {
                         true => partition_1
-                            .vectors
                             .iter()
-                            .take(partition_1.size)
-                            .map(|vertex| vertex.unwrap())
                             .filter(|vertex| vertex.id == *vec_id_1.1)
                             .next()
                             .unwrap(),
@@ -604,10 +595,7 @@ mod test {
                 let vec_2 = {
                     match intra_graph_2.1.contains_key(&vec_id_2.1) {
                         true => partition_2
-                            .vectors
                             .iter()
-                            .take(partition_2.size)
-                            .map(|vertex| vertex.unwrap())
                             .filter(|vertex| vertex.id == *vec_id_2.1)
                             .next()
                             .unwrap(),
@@ -629,10 +617,7 @@ mod test {
                 let vec_1 = {
                     match intra_graph_1.1.contains_key(&vec_id_1.1) {
                         true => partition_1
-                            .vectors
                             .iter()
-                            .take(partition_1.size)
-                            .map(|vertex| vertex.unwrap())
                             .filter(|vertex| vertex.id == *vec_id_1.1)
                             .next()
                             .unwrap(),
@@ -645,10 +630,7 @@ mod test {
                 let vec_2 = {
                     match intra_graph_2.1.contains_key(&vec_id_2.1) {
                         true => partition_2
-                            .vectors
                             .iter()
-                            .take(partition_2.size)
-                            .map(|vertex| vertex.unwrap())
                             .filter(|vertex| vertex.id == *vec_id_2.1)
                             .next()
                             .unwrap(),
@@ -825,10 +807,7 @@ mod test {
 
             assert!(intra_graph_1.1.contains_key(partition_1_vec));
             let vec_1 = partition_1
-                .vectors
                 .iter()
-                .take(partition_1.size)
-                .map(|x| x.unwrap())
                 .filter(|vec| vec.id == **partition_1_vec)
                 .next();
 
@@ -839,10 +818,7 @@ mod test {
             // check if partition_1_vec == Vector([4., 0])
             assert!(intra_graph_2.1.contains_key(partition_2_vec));
             let vec_2 = partition_2
-                .vectors
                 .iter()
-                .take(partition_1.size)
-                .map(|x| x.unwrap())
                 .filter(|vec| vec.id == **partition_2_vec)
                 .next();
 

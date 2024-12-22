@@ -695,22 +695,22 @@ impl<
         }
     }
 
-    pub fn merge(&mut self, other: Self) -> Result<(), PartitionErr> {
-        if self.size + other.size >= VECTOR_CAP {
-            return Err(PartitionErr::Overflow);
-        }
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &VectorEntry<A, B>> + '_> {
+        Box::new(
+            self.vectors
+                .iter()
+                .take(self.size)
+                .map(vec_unwrap)
+        )
+    }
 
-        (0..other.size)
-            .map(|i| (i, other.vectors[i]))
-            .for_each(|(i, x)| {
-                self.centroid = B::add(&self.centroid, &x.unwrap().vector);
 
-                let _ = mem::replace(&mut self.vectors[self.size + i], x);
-            });
+}
 
-        self.size += other.size;
-
-        Ok(())
+fn vec_unwrap<'a, A: Field<A>, B: VectorSpace<A>>(vector: &'a Option<VectorEntry<A, B>>) -> &'a VectorEntry<A, B> {
+    match vector {
+        Some(vector) => vector,
+        None => panic!(),
     }
 }
 
