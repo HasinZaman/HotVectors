@@ -1,6 +1,12 @@
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 
-use petgraph::{adj::NodeIndex, csr::DefaultIx, data::DataMap, graph::EdgeIndex, visit::{EdgeRef, IntoEdgeReferences}};
+use petgraph::{
+    adj::NodeIndex,
+    csr::DefaultIx,
+    data::DataMap,
+    graph::EdgeIndex,
+    visit::{EdgeRef, IntoEdgeReferences},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -90,12 +96,7 @@ where
                     .chain(
                         neighbors
                             .iter()
-                            .map(|partition| {
-                                partition
-                                    .0
-                                    .iter()
-                                    .map(|vec| (partition.0.id, vec))
-                            })
+                            .map(|partition| partition.0.iter().map(|vec| (partition.0.id, vec)))
                             .flatten(),
                     )
                     .enumerate()
@@ -154,22 +155,23 @@ where
                     })
                     .map(|edge| {
                         let edge_id = edge.id();
-                        let (edge_dist, vertex_1, vertex_2) = edge.weight();
+                        let (edge_dist, vector_1, vector_2) = edge.weight();
 
-                        let other_partition = get_other(
-                            &target.id,
-                            inter_graph.0.node_weight(edge.source()).unwrap(),
-                            inter_graph.0.node_weight(edge.target()).unwrap(),
-                        );
+                        let other_vector = match target.id == *vector_1.0 {
+                            true => vector_2,
+                            false => vector_1,
+                        };
 
-                        let other_vector = get_other(&closet_id.1, &vertex_1.1, &vertex_2.1);
-
+                        (edge_id, edge_dist, (other_vector.0, other_vector.1))
+                    })
+                    .filter(|(_, _, id)| dist.contains_key(id))
+                    .map(|(edge_id, edge_dist, (other_partition, other_vector))| {
                         EdgeType::InterEdge(
                             *edge_dist,
-                            dist[&(PartitionId(*other_partition), *other_vector)].1,
+                            dist[&(other_partition, other_vector)].1,
                             edge_id,
                             closet_id.1,
-                            *other_vector,
+                            other_vector,
                             PartitionId(*other_partition),
                         )
                     });
@@ -222,22 +224,23 @@ where
                     })
                     .map(|edge| {
                         let edge_id = edge.id();
-                        let (edge_dist, vertex_1, vertex_2) = edge.weight();
+                        let (edge_dist, vector_1, vector_2) = edge.weight();
 
-                        let other_partition = get_other(
-                            &target.id,
-                            inter_graph.0.node_weight(edge.source()).unwrap(),
-                            inter_graph.0.node_weight(edge.target()).unwrap(),
-                        );
+                        let other_vector = match target.id == *vector_1.0 {
+                            true => vector_2,
+                            false => vector_1,
+                        };
 
-                        let other_vector = get_other(&closet_id.1, &vertex_1.1, &vertex_2.1);
-
+                        (edge_id, edge_dist, (other_vector.0, other_vector.1))
+                    })
+                    .filter(|(_, _, id)| dist.contains_key(id))
+                    .map(|(edge_id, edge_dist, (other_partition, other_vector))| {
                         EdgeType::InterEdge(
                             *edge_dist,
-                            dist[&(PartitionId(*other_partition), *other_vector)].1,
+                            dist[&(other_partition, other_vector)].1,
                             edge_id,
                             closet_id.1,
-                            *other_vector,
+                            other_vector,
                             PartitionId(*other_partition),
                         )
                     });
@@ -255,7 +258,9 @@ where
 
         replace_edges.iter().for_each(|edge| match edge {
             EdgeType::Internal(_, dist, edge_index, _, vector_id) => {
-                intra_graph.0.add_edge(intra_graph.1[vector_id], value_node_index, *dist);
+                intra_graph
+                    .0
+                    .add_edge(intra_graph.1[vector_id], value_node_index, *dist);
                 intra_graph.0.remove_edge(*edge_index);
                 // todo!()
             }
@@ -290,7 +295,9 @@ where
         match index < partition_splits[0] {
             true => {
                 // new intra_edge
-                intra_graph.0.add_edge(intra_graph.1[&closet_id.1], value_node_index, closet_dist);
+                intra_graph
+                    .0
+                    .add_edge(intra_graph.1[&closet_id.1], value_node_index, closet_dist);
             }
             false => {
                 inter_graph.0.add_edge(
@@ -518,7 +525,7 @@ mod test {
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_1 = IntraPartitionGraph::new();
         inter_graph.add_node(PartitionId(partition_1.id));
-        
+
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_2 = IntraPartitionGraph::new();
         inter_graph.add_node(PartitionId(partition_2.id));
@@ -715,8 +722,6 @@ mod test {
                     ),
                 ),
             );
-
-            println!("{:#?}", inter_graph);
         }
 
         let new_vector = VectorEntry::from_uuid(Vector([4., 0.]), Uuid::new_v4());
@@ -817,9 +822,6 @@ mod test {
                     .vector
             );
         };
-
-        println!("{:?}", partition_1);
-        println!("{:#?}", inter_graph);
     }
 
     // foreign case 3:
