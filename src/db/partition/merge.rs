@@ -1,18 +1,17 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Debug};
 
-use petgraph::{graph::EdgeIndex, visit::EdgeRef};
+use petgraph::{graph::EdgeIndex, visit::{EdgeRef, IntoEdgeReferences, NodeRef}};
 use tokio::try_join;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
 use super::{
-    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr,
-    PartitionId, VectorId,
+    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr, PartitionId, VectorEntry, VectorId
 };
 
 // TESTABLE
 pub(self) fn merge_into<
-    A: PartialEq + Clone + Copy + Field<A>,
+    A: PartialEq + Clone + Copy + Field<A> + Debug,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
@@ -29,56 +28,36 @@ pub(self) fn merge_into<
         return Err(PartitionErr::Overflow);
     }
 
-    //move vectors from partition_2 into partition_1
-    partition_1.vectors[partition_1.size..]
-        .swap_with_slice(&mut partition_2.vectors[..partition_2.size]);
-    partition_1.size = partition_1.size + partition_2.size;
-
-    intra_graph_2.1.keys().for_each(|id| {
-        let idx = intra_graph_1.0.add_node(*id);
-        intra_graph_1.1.insert(*id, idx);
-    });
-
-    // update centeroid
-    partition_1.centroid = B::add(&partition_1.centroid, &partition_2.centroid);
+    partition_2.iter()
+        .for_each(|VectorEntry{id, vector: _, _phantom_data: _ }| {
+            let idx = intra_graph_1.0.add_node(VectorId(*id));
+            intra_graph_1.1.insert(VectorId(*id), idx);
+        });
 
     // move edges from intra_graph_2 -> intra_graph_1
     {
+        // println!("Move edges");
         intra_graph_2
             .0
-            .edge_indices()
-            .map(|edge_index| {
-                (
-                    intra_graph_2
-                        .0
-                        .edge_endpoints(edge_index)
-                        .map(|(start, end)| {
-                            (
-                                intra_graph_2.0.node_weight(start).unwrap(),
-                                intra_graph_2.0.node_weight(end).unwrap(),
-                            )
-                        })
-                        .unwrap(),
-                    intra_graph_2.0.edge_weight(edge_index).unwrap(),
-                )
-            })
-            .for_each(|((start, end), dist)| {
+            .edge_references()
+            .map(|edge_reference| (
+                intra_graph_2.0.node_weight(edge_reference.source()).unwrap(),
+                intra_graph_2.0.node_weight(edge_reference.target()).unwrap(),
+                edge_reference.weight()
+            ))
+            .for_each(|(start, end, dist)| {
+                // println!("{:?}\t<-({:?})->\t{:?}", start, dist, end);
                 let _ =
                     intra_graph_1
                         .0
                         .add_edge(intra_graph_1.1[start], intra_graph_1.1[end], *dist);
             });
     }
-    // move intra_edge from (partition_1, partition_2) -> intra_graph_1
-    {
+    // move inter_edge from (partition_1, partition_2) -> intra_graph_1
+    'move_common_inter_edge: {
         let del_index: Vec<EdgeIndex> = inter_graph
             .0
             .edges(inter_graph.1[&PartitionId(partition_2.id)])
-            .chain(
-                inter_graph
-                    .0
-                    .edges(inter_graph.1[&PartitionId(partition_1.id)]),
-            )
             .filter(|edge| {
                 (**inter_graph.0.node_weight(edge.source()).unwrap() == partition_1.id
                     || **inter_graph.0.node_weight(edge.source()).unwrap() == partition_2.id)
@@ -88,6 +67,8 @@ pub(self) fn merge_into<
             .map(|edge_ref| {
                 let (dist, start, end) = edge_ref.weight();
 
+                // println!("Common edge\n{:#?}", (dist, start, end));
+
                 intra_graph_1
                     .0
                     .add_edge(intra_graph_1.1[&start.1], intra_graph_1.1[&end.1], *dist);
@@ -95,6 +76,10 @@ pub(self) fn merge_into<
                 edge_ref.id()
             })
             .collect();
+
+        if del_index.len() == 0 {
+            break 'move_common_inter_edge;
+        }
 
         del_index.into_iter().for_each(|index| {
             inter_graph.0.remove_edge(index);
@@ -106,6 +91,12 @@ pub(self) fn merge_into<
         let move_index: Vec<EdgeIndex> = inter_graph
             .0
             .edges(inter_graph.1[&PartitionId(partition_2.id)])
+            .filter(|edge| {
+                !((**inter_graph.0.node_weight(edge.source()).unwrap() == partition_1.id
+                    || **inter_graph.0.node_weight(edge.source()).unwrap() == partition_2.id)
+                    && (**inter_graph.0.node_weight(edge.target()).unwrap() == partition_1.id
+                        || **inter_graph.0.node_weight(edge.target()).unwrap() == partition_2.id))
+            })
             .map(|edge_ref| edge_ref.id())
             .collect();
 
@@ -132,6 +123,14 @@ pub(self) fn merge_into<
             .collect::<Vec<(A, (PartitionId, VectorId), (PartitionId, VectorId))>>();
 
         new_edges.into_iter().for_each(|(dist, id_1, id_2)| {
+            println!(
+                "Moved inter_ege: {:?}",
+                (
+                    inter_graph.1[&id_1.0],
+                    inter_graph.1[&id_2.0],
+                    (dist, id_1, id_2),
+                )
+            );
             inter_graph.0.add_edge(
                 inter_graph.1[&id_1.0],
                 inter_graph.1[&id_2.0],
@@ -148,6 +147,14 @@ pub(self) fn merge_into<
             .remove_node(inter_graph.1[&PartitionId(partition_2.id)]);
         inter_graph.1.remove(&PartitionId(partition_2.id));
     };
+
+    //move vectors from partition_2 into partition_1
+    partition_1.vectors[partition_1.size..partition_1.size+partition_2.size]
+        .swap_with_slice(&mut partition_2.vectors[..partition_2.size]);
+    partition_1.size = partition_1.size + partition_2.size;
+
+    // update centeroid
+    partition_1.centroid = B::add(&partition_1.centroid, &partition_2.centroid);
 
     Ok(())
 }
@@ -181,19 +188,21 @@ pub async fn merge<
         Ok(partition) => partition,
         Err(_) => todo!(),
     };
-
-    merge_into(
-        &mut partition_1.0,
-        &mut partition_1.1,
-        &mut partition_2,
-        &inter_graph_2,
-        inter_graph,
-    )
+    todo!()
+    // merge_into(
+    //     &mut partition_1.0,
+    //     &mut partition_1.1,
+    //     &mut partition_2,
+    //     &inter_graph_2,
+    //     inter_graph,
+    // )
 }
 
 #[cfg(test)]
 mod test {
-    use petgraph::visit::EdgeRef;
+    use std::fmt::Debug;
+
+    use petgraph::visit::{EdgeRef, IntoEdgeReferences};
     use rkyv::vec;
     use uuid::Uuid;
 
@@ -207,42 +216,40 @@ mod test {
         vector::{Field, Vector, VectorSerial, VectorSpace},
     };
 
-    
     fn check_partition_neighbors<
-        A: PartialEq + Clone + Copy + Field<A>,
-        B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
+        A: PartialEq + Clone + Copy + Field<A> + Debug,
+        B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Debug,
         const PARTITION_CAP: usize,
         const VECTOR_CAP: usize,
-    >
-    (
+    >(
         index: usize,
         intra_graph: &IntraPartitionGraph<A>,
         partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         neighbors: &[Uuid],
     ) {
+        let result = intra_graph
+            .0
+            .edges(intra_graph.1[&VectorId(partition.vectors[index].unwrap().id)])
+            .count();
         assert_eq!(
-            intra_graph
-                .0
-                .edges(intra_graph.1[&VectorId(partition.vectors[index].unwrap().id)])
-                .count(),
+            result,
             neighbors.len()
         );
-    
-        assert!(
-            intra_graph
-                .0
-                .edges(intra_graph.1[&VectorId(partition.vectors[index].unwrap().id)])
-                .map(|edge| {
-                    match **intra_graph.0.node_weight(edge.source()).unwrap()
-                        == partition.vectors[0].unwrap().id
-                    {
-                        true => intra_graph.0.node_weight(edge.target()).unwrap(),
-                        false => intra_graph.0.node_weight(edge.source()).unwrap(),
-                    }
-                })
-                .map(|id| **id)
-                .all(|neighbor_vertex| neighbors.contains(&neighbor_vertex))
-        );
+
+        let result = intra_graph
+            .0
+            .edges(intra_graph.1[&VectorId(partition.vectors[index].unwrap().id)])
+            .map(|edge| {
+                match **intra_graph.0.node_weight(edge.source()).unwrap()
+                    == partition.vectors[index].unwrap().id
+                {
+                    true => intra_graph.0.node_weight(edge.target()).unwrap(),
+                    false => intra_graph.0.node_weight(edge.source()).unwrap(),
+                }
+            })
+            .map(|id| **id)
+            .all(|neighbor_vertex| neighbors.contains(&neighbor_vertex));
+        assert!(result);
     }
 
     // merge two partitions
@@ -262,8 +269,10 @@ mod test {
 
         assert_eq!(inter_graph.1.len(), 2);
 
+         
         // initialize partitions
-        {
+        let search_vectors = {
+            let mut search_vectors = Vec::new();
             // Insert into partition
             let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
             let result = add(
@@ -285,6 +294,7 @@ mod test {
             assert!(result.is_ok());
 
             let vector = VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4());
+            search_vectors.push(vector.clone());
             let result = add(
                 &mut partition_2,
                 vector.clone(),
@@ -294,6 +304,7 @@ mod test {
             );
             assert!(result.is_ok());
             let vector = VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4());
+            search_vectors.push(vector.clone());
             let result = add(
                 &mut partition_2,
                 vector.clone(),
@@ -302,7 +313,9 @@ mod test {
                 &mut [(&partition_1, &mut intra_graph_1)],
             );
             assert!(result.is_ok());
-        }
+
+            search_vectors
+        };
 
         let result = merge_into(
             &mut partition_1,
@@ -320,17 +333,11 @@ mod test {
         assert_eq!(partition_1.size, 4);
 
         // check both vectors are in partition_1
-        assert!(partition_2
-            .vectors
+        assert!(search_vectors
             .iter()
-            .take(partition_2.size)
-            .map(|x| x.unwrap())
             .all(|search_vector| {
                 partition_1
-                    .vectors
                     .iter()
-                    .take(partition_1.size)
-                    .map(|x| x.unwrap())
                     .any(|vector| {
                         vector.id == search_vector.id && vector.vector == search_vector.vector
                     })
@@ -360,36 +367,31 @@ mod test {
                 &[
                     partition_1.vectors[1].unwrap().id,
                     partition_1.vectors[2].unwrap().id,
-                ]
+                ],
             );
             check_partition_neighbors(
                 1,
                 &intra_graph_1,
                 &partition_1,
-                &[
-                    partition_1.vectors[0].unwrap().id,
-                ]
+                &[partition_1.vectors[0].unwrap().id],
             );
             check_partition_neighbors(
                 2,
                 &intra_graph_1,
                 &partition_1,
                 &[
-                    partition_1.vectors[1].unwrap().id,
-                    partition_1.vectors[2].unwrap().id,
-                ]
+                    partition_1.vectors[0].unwrap().id,
+                    partition_1.vectors[3].unwrap().id,
+                ],
             );
             check_partition_neighbors(
                 3,
                 &intra_graph_1,
                 &partition_1,
-                &[
-                    partition_1.vectors[2].unwrap().id,
-                ]
+                &[partition_1.vectors[2].unwrap().id],
             );
         }
     }
-
 
     #[test]
     fn merge_with_neighbors() {
@@ -413,7 +415,7 @@ mod test {
         let mut partition_4 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
         let mut intra_graph_4 = IntraPartitionGraph::new();
         let index = inter_graph.0.add_node(PartitionId(partition_4.id));
-        inter_graph.1.insert(PartitionId(partition_3.id), index);
+        inter_graph.1.insert(PartitionId(partition_4.id), index);
 
         assert_eq!(inter_graph.1.len(), 4);
 
@@ -482,7 +484,7 @@ mod test {
                 );
                 assert!(result.is_ok());
             }
-            
+
             {
                 let vector = VectorEntry::from_uuid(Vector([1., 0.]), Uuid::new_v4());
                 let result = add(
@@ -522,20 +524,14 @@ mod test {
 
         // check both vectors are in partition_1
         assert!(partition_2
-            .vectors
             .iter()
-            .take(partition_2.size)
-            .map(|x| x.unwrap())
             .all(|search_vector| {
                 partition_1
-                    .vectors
                     .iter()
-                    .take(partition_1.size)
-                    .map(|x| x.unwrap())
                     .any(|vector| {
                         vector.id == search_vector.id && vector.vector == search_vector.vector
                     })
-            }));        
+            }));
 
         // check inter_graph
         {
@@ -550,20 +546,20 @@ mod test {
             );
 
             assert!(
-                inter_graph.0
+                inter_graph
+                    .0
                     .edges(inter_graph.1[&PartitionId(partition_1.id)])
                     .map(|edge| {
-                        match **inter_graph.0.node_weight(edge.source()).unwrap()
-                            == partition_1.id
+                        match **inter_graph.0.node_weight(edge.source()).unwrap() == partition_1.id
                         {
                             true => inter_graph.0.node_weight(edge.target()).unwrap(),
                             false => inter_graph.0.node_weight(edge.source()).unwrap(),
                         }
                     })
                     .map(|id| **id)
-                    .all(|neighbor_vertex| [partition_3.id, partition_4.id].contains(&neighbor_vertex))
+                    .all(|neighbor_vertex| [partition_3.id, partition_4.id]
+                        .contains(&neighbor_vertex))
             );
-
 
             assert_eq!(inter_graph.1.get(&PartitionId(partition_2.id)), None);
         }
@@ -578,15 +574,13 @@ mod test {
                 &[
                     partition_1.vectors[1].unwrap().id,
                     partition_1.vectors[2].unwrap().id,
-                ]
+                ],
             );
             check_partition_neighbors(
                 1,
                 &intra_graph_1,
                 &partition_1,
-                &[
-                    partition_1.vectors[0].unwrap().id,
-                ]
+                &[partition_1.vectors[0].unwrap().id],
             );
             check_partition_neighbors(
                 2,
@@ -595,15 +589,13 @@ mod test {
                 &[
                     partition_1.vectors[1].unwrap().id,
                     partition_1.vectors[2].unwrap().id,
-                ]
+                ],
             );
             check_partition_neighbors(
                 3,
                 &intra_graph_1,
                 &partition_1,
-                &[
-                    partition_1.vectors[2].unwrap().id,
-                ]
+                &[partition_1.vectors[2].unwrap().id],
             );
         }
     }
@@ -671,7 +663,5 @@ mod test {
             &mut inter_graph,
         );
         assert!(result.is_err());
-
-
     }
 }

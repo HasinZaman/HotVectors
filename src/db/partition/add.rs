@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 
-use petgraph::{adj::NodeIndex, csr::DefaultIx, data::DataMap, graph::EdgeIndex, visit::EdgeRef};
+use petgraph::{adj::NodeIndex, csr::DefaultIx, data::DataMap, graph::EdgeIndex, visit::{EdgeRef, IntoEdgeReferences}};
 use uuid::Uuid;
 
 use crate::{
@@ -44,21 +44,11 @@ pub fn add<
     )],
 ) -> Result<(), PartitionErr>
 where
-    A: PartialOrd + Debug,
+    A: PartialOrd,
 {
     if target.size + 1 >= PARTITION_CAP {
         return Err(PartitionErr::Overflow);
     };
-
-    // if target.size == 0 {
-    //     target.vectors[target.size] = Some(value);
-    //     target.size += 1;
-
-    //     target.centroid = value.vector;
-
-    //     let idx = intra_graph.add_node(VectorId(value.id));
-    //     return Ok(());
-    // }
 
     let id_to_graph = neighbors
         .iter()
@@ -73,8 +63,8 @@ where
 
     // insert node into a minimum spanning tree
     'add_edges: {
-        let idx = intra_graph.add_node(VectorId(value.id));
-        intra_graph.1.insert(VectorId(value.id), idx);
+        let value_node_index = intra_graph.add_node(VectorId(value.id));
+        intra_graph.1.insert(VectorId(value.id), value_node_index);
         let partition_splits = {
             let mut tmp = vec![target.size];
 
@@ -265,7 +255,7 @@ where
 
         replace_edges.iter().for_each(|edge| match edge {
             EdgeType::Internal(_, dist, edge_index, _, vector_id) => {
-                intra_graph.0.add_edge(intra_graph.1[vector_id], idx, *dist);
+                intra_graph.0.add_edge(intra_graph.1[vector_id], value_node_index, *dist);
                 intra_graph.0.remove_edge(*edge_index);
                 // todo!()
             }
@@ -300,10 +290,7 @@ where
         match index < partition_splits[0] {
             true => {
                 // new intra_edge
-                intra_graph.1.insert(closet_id.1, idx);
-                intra_graph
-                    .0
-                    .add_edge(intra_graph.1[&closet_id.1], idx, closet_dist);
+                intra_graph.0.add_edge(intra_graph.1[&closet_id.1], value_node_index, closet_dist);
             }
             false => {
                 inter_graph.0.add_edge(
