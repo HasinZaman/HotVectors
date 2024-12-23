@@ -716,12 +716,15 @@ impl<
         const VECTOR_CAP: usize,
     > Index<usize> for Partition<A, B, PARTITION_CAP, VECTOR_CAP>
 {
-    type Output = Option<VectorEntry<A, B>>;
+    type Output = VectorEntry<A, B>;
 
     fn index(&self, index: usize) -> &Self::Output {
         assert!(index >= self.size);
 
-        &self.vectors[index]
+        match self.vectors.get(index) {
+            Some(Some(vector)) => vector,
+            _ => todo!(),
+        }
     }
 }
 
