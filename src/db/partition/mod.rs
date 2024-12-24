@@ -134,6 +134,13 @@ impl<I: Clone + Copy + Hash + PartialEq + Eq, V> PartitionGraph<I, V> {
 
         idx
     }
+
+    pub fn add_edge(&mut self, node_1: I, node_2: I, weight: V) {
+        let idx_1 = self.1[&node_1];
+        let idx_2 = self.1[&node_2];
+
+        self.0.add_edge(idx_1, idx_2, weight);
+    }
 }
 
 pub type InterPartitionGraph<A: Field<A>> =

@@ -268,9 +268,9 @@ where
                 let (_, intra_graph) = &mut neighbors[id_to_graph[&**partition_id]];
                 intra_graph.0.remove_edge(*edge_index);
 
-                inter_graph.0.add_edge(
-                    inter_graph.1[&PartitionId(target.id)],
-                    inter_graph.1[partition_id],
+                inter_graph.add_edge(
+                    PartitionId(target.id),
+                    *partition_id,
                     (
                         *dist,
                         (PartitionId(target.id), *vector_id),
@@ -279,9 +279,9 @@ where
                 );
             }
             EdgeType::InterEdge(_, dist, edge_index, _, vector_id, partition_id) => {
-                inter_graph.0.add_edge(
-                    inter_graph.1[&PartitionId(target.id)],
-                    inter_graph.1[partition_id],
+                inter_graph.add_edge(
+                    PartitionId(target.id),
+                    *partition_id,
                     (
                         *dist,
                         (PartitionId(target.id), *vector_id),
@@ -300,9 +300,9 @@ where
                     .add_edge(intra_graph.1[&closet_id.1], value_node_index, closet_dist);
             }
             false => {
-                inter_graph.0.add_edge(
-                    inter_graph.1[&closet_id.0],
-                    inter_graph.1[&PartitionId(target.id)],
+                inter_graph.add_edge(
+                    closet_id.0,
+                    PartitionId(target.id),
                     (
                         closet_dist,
                         closet_id,
@@ -689,9 +689,9 @@ mod test {
             });
         }
         {
-            inter_graph.0.add_edge(
-                inter_graph.1[&PartitionId(partition_1.id)],
-                inter_graph.1[&PartitionId(partition_2.id)],
+            inter_graph.add_edge(
+                PartitionId(partition_1.id),
+                PartitionId(partition_2.id),
                 (
                     0.5,
                     (

@@ -62,10 +62,7 @@ pub(self) fn merge_into<
                 )
             })
             .for_each(|(start, end, dist)| {
-                let _ =
-                    intra_graph_1
-                        .0
-                        .add_edge(intra_graph_1.1[start], intra_graph_1.1[end], *dist);
+                let _ = intra_graph_1.add_edge(*start, *end, *dist);
             });
     }
     // move inter_edge from (partition_1, partition_2) -> intra_graph_1
@@ -82,9 +79,7 @@ pub(self) fn merge_into<
             .map(|edge_ref| {
                 let (dist, start, end) = edge_ref.weight();
 
-                intra_graph_1
-                    .0
-                    .add_edge(intra_graph_1.1[&start.1], intra_graph_1.1[&end.1], *dist);
+                intra_graph_1.add_edge(start.1, end.1, *dist);
 
                 edge_ref.id()
             })
@@ -136,11 +131,7 @@ pub(self) fn merge_into<
             .collect::<Vec<(A, (PartitionId, VectorId), (PartitionId, VectorId))>>();
 
         new_edges.into_iter().for_each(|(dist, id_1, id_2)| {
-            inter_graph.0.add_edge(
-                inter_graph.1[&id_1.0],
-                inter_graph.1[&id_2.0],
-                (dist, id_1, id_2),
-            );
+            inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
         });
 
         move_index.into_iter().for_each(|index| {
