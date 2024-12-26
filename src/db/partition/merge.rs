@@ -204,7 +204,7 @@ mod test {
 
     use crate::{
         db::partition::{
-            add::add,
+            add::add_into,
             merge::{self, merge_into},
             InterPartitionGraph, IntraPartitionGraph, Partition, PartitionId, VectorEntry,
             VectorId,
@@ -265,7 +265,7 @@ mod test {
             let mut search_vectors = Vec::new();
             // Insert into partition
             let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_1,
                 vector.clone(),
                 &mut intra_graph_1,
@@ -274,7 +274,7 @@ mod test {
             );
             assert!(result.is_ok());
             let vector = VectorEntry::from_uuid(Vector::splat(2.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_1,
                 vector.clone(),
                 &mut intra_graph_1,
@@ -285,7 +285,7 @@ mod test {
 
             let vector = VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4());
             search_vectors.push(vector.clone());
-            let result = add(
+            let result = add_into(
                 &mut partition_2,
                 vector.clone(),
                 &mut intra_graph_2,
@@ -295,7 +295,7 @@ mod test {
             assert!(result.is_ok());
             let vector = VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4());
             search_vectors.push(vector.clone());
-            let result = add(
+            let result = add_into(
                 &mut partition_2,
                 vector.clone(),
                 &mut intra_graph_2,
@@ -407,7 +407,7 @@ mod test {
             // Insert into partition
             {
                 let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_1,
                     vector.clone(),
                     &mut intra_graph_1,
@@ -416,7 +416,7 @@ mod test {
                 );
                 assert!(result.is_ok());
                 let vector = VectorEntry::from_uuid(Vector::splat(2.), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_1,
                     vector.clone(),
                     &mut intra_graph_1,
@@ -428,7 +428,7 @@ mod test {
 
             {
                 let vector = VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_2,
                     vector.clone(),
                     &mut intra_graph_2,
@@ -438,7 +438,7 @@ mod test {
                 assert!(result.is_ok());
                 search_vectors.push(vector);
                 let vector = VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_2,
                     vector.clone(),
                     &mut intra_graph_2,
@@ -451,7 +451,7 @@ mod test {
 
             {
                 let vector = VectorEntry::from_uuid(Vector([-1., 0.]), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_3,
                     vector.clone(),
                     &mut intra_graph_3,
@@ -460,7 +460,7 @@ mod test {
                 );
                 assert!(result.is_ok());
                 let vector = VectorEntry::from_uuid(Vector([-2., 0.]), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_3,
                     vector.clone(),
                     &mut intra_graph_3,
@@ -472,7 +472,7 @@ mod test {
 
             {
                 let vector = VectorEntry::from_uuid(Vector([1., 0.]), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_4,
                     vector.clone(),
                     &mut intra_graph_4,
@@ -481,7 +481,7 @@ mod test {
                 );
                 assert!(result.is_ok());
                 let vector = VectorEntry::from_uuid(Vector([2., 0.]), Uuid::new_v4());
-                let result = add(
+                let result = add_into(
                     &mut partition_4,
                     vector.clone(),
                     &mut intra_graph_4,
@@ -598,7 +598,7 @@ mod test {
         {
             // Insert into partition
             let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_1,
                 vector.clone(),
                 &mut intra_graph_1,
@@ -607,7 +607,7 @@ mod test {
             );
             assert!(result.is_ok());
             let vector = VectorEntry::from_uuid(Vector::splat(2.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_1,
                 vector.clone(),
                 &mut intra_graph_1,
@@ -617,7 +617,7 @@ mod test {
             assert!(result.is_ok());
 
             let vector = VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_2,
                 vector.clone(),
                 &mut intra_graph_2,
@@ -626,7 +626,7 @@ mod test {
             );
             assert!(result.is_ok());
             let vector = VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4());
-            let result = add(
+            let result = add_into(
                 &mut partition_2,
                 vector.clone(),
                 &mut intra_graph_2,

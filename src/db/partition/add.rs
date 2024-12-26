@@ -32,7 +32,7 @@ fn get_other<'a, A: Eq>(select: &A, val_1: &'a A, val_2: &'a A) -> &'a A {
     val_1
 }
 
-pub fn add<
+pub fn add_into<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
@@ -317,7 +317,7 @@ where
     Ok(())
 }
 
-pub async fn add_async<
+pub async fn add<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
@@ -348,7 +348,7 @@ mod test {
 
     use crate::{
         db::partition::{
-            self, add::add, InterPartitionGraph, IntraPartitionGraph, Partition, PartitionId,
+            self, add::add_into, InterPartitionGraph, IntraPartitionGraph, Partition, PartitionId,
             VectorEntry, VectorId,
         },
         vector::{self, Vector, VectorSpace},
@@ -370,7 +370,7 @@ mod test {
         // Insert into partition
         let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
 
-        let result = add(
+        let result = add_into(
             &mut partition,
             vector.clone(),
             &mut intra_graph,
@@ -412,7 +412,7 @@ mod test {
             .collect::<Vec<VectorEntry<f32, Vector<f32, 2>>>>();
 
         vectors.iter().for_each(|vector| {
-            let result = add(
+            let result = add_into(
                 &mut partition,
                 vector.clone(),
                 &mut intra_graph,
@@ -532,7 +532,7 @@ mod test {
 
         // Insert into partition
         let vector = VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4());
-        let result = add(
+        let result = add_into(
             &mut partition_1,
             vector.clone(),
             &mut intra_graph_1,
@@ -541,7 +541,7 @@ mod test {
         );
         assert!(result.is_ok());
         let vector = VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4());
-        let result = add(
+        let result = add_into(
             &mut partition_2,
             vector.clone(),
             &mut intra_graph_2,
@@ -660,7 +660,7 @@ mod test {
                 .collect::<Vec<VectorEntry<f32, Vector<f32, 2>>>>();
 
             vectors.iter().for_each(|vector| {
-                let result = add(
+                let result = add_into(
                     &mut partition_1,
                     vector.clone(),
                     &mut intra_graph_1,
@@ -677,7 +677,7 @@ mod test {
                 .collect::<Vec<VectorEntry<f32, Vector<f32, 2>>>>();
 
             vectors.iter().for_each(|vector| {
-                let result = add(
+                let result = add_into(
                     &mut partition_2,
                     vector.clone(),
                     &mut intra_graph_2,
@@ -725,7 +725,7 @@ mod test {
         }
 
         let new_vector = VectorEntry::from_uuid(Vector([4., 0.]), Uuid::new_v4());
-        let result = add(
+        let result = add_into(
             &mut partition_1,
             new_vector.clone(),
             &mut intra_graph_1,

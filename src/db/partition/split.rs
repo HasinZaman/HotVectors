@@ -495,7 +495,7 @@ pub async fn split<
 
 #[cfg(test)]
 mod tests {
-    use partition::add::add;
+    use partition::add::add_into;
     use uuid::Uuid;
 
     use super::*;
@@ -538,7 +538,7 @@ mod tests {
             .map(|x| x.iter())
             .flatten()
             .for_each(|vector| {
-                let result = add(
+                let result = add_into(
                     &mut partition,
                     vector.clone(),
                     &mut intra_graph,
@@ -630,7 +630,7 @@ mod tests {
             .map(|x| x.iter())
             .flatten()
             .for_each(|vector| {
-                let result = add(
+                let result = add_into(
                     &mut partition,
                     vector.clone(),
                     &mut intra_graph,
