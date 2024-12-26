@@ -456,6 +456,7 @@ pub enum PartitionErr {
     Overflow,
     VectorNotFound,
     PartitionEmpty,
+    InsufficientSizeForSplits
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -726,7 +727,7 @@ impl<
     type Output = VectorEntry<A, B>;
 
     fn index(&self, index: usize) -> &Self::Output {
-        assert!(index >= self.size);
+        assert!(index < self.size);
 
         match self.vectors.get(index) {
             Some(Some(vector)) => vector,
