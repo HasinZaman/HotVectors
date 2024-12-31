@@ -251,11 +251,11 @@ mod test {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_1 = IntraPartitionGraph::new();
+        let mut intra_graph_1 = IntraPartitionGraph::new(PartitionId(partition_1.id));
         inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_2 = IntraPartitionGraph::new();
+        let mut intra_graph_2 = IntraPartitionGraph::new(PartitionId(partition_2.id));
         inter_graph.add_node(PartitionId(partition_2.id));
 
         assert_eq!(inter_graph.1.len(), 2);
@@ -384,19 +384,19 @@ mod test {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_1 = IntraPartitionGraph::new();
+        let mut intra_graph_1 = IntraPartitionGraph::new(PartitionId(partition_1.id));
         inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_2 = IntraPartitionGraph::new();
+        let mut intra_graph_2 = IntraPartitionGraph::new(PartitionId(partition_2.id));
         inter_graph.add_node(PartitionId(partition_2.id));
 
         let mut partition_3 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_3 = IntraPartitionGraph::new();
+        let mut intra_graph_3 = IntraPartitionGraph::new(PartitionId(partition_3.id));
         inter_graph.add_node(PartitionId(partition_3.id));
 
         let mut partition_4 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_4 = IntraPartitionGraph::new();
+        let mut intra_graph_4 = IntraPartitionGraph::new(PartitionId(partition_4.id));
         inter_graph.add_node(PartitionId(partition_4.id));
 
         assert_eq!(inter_graph.1.len(), 4);
@@ -588,11 +588,11 @@ mod test {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 3, 500>::new();
-        let mut intra_graph_1 = IntraPartitionGraph::new();
+        let mut intra_graph_1 = IntraPartitionGraph::new(PartitionId(partition_1.id));
         inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 3, 500>::new();
-        let mut intra_graph_2 = IntraPartitionGraph::new();
+        let mut intra_graph_2 = IntraPartitionGraph::new(PartitionId(partition_2.id));
         inter_graph.add_node(PartitionId(partition_2.id));
         // initialize partitions
         {

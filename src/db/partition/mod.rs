@@ -696,7 +696,7 @@ impl<
         }
 
         let mut new_partition = Partition::new();
-        let mut new_graph = IntraPartitionGraph::new();
+        let mut new_graph = IntraPartitionGraph::new(PartitionId(new_partition.id));
 
         todo!();
         // let _ = new_partition.add(self.pop().unwrap(), &mut new_graph);

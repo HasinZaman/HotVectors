@@ -29,6 +29,7 @@ struct PartitionSubSet<
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
 > {
+    pub id: Uuid,
     source: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
 
     pub size: usize,
@@ -61,6 +62,7 @@ impl<
 {
     fn new(value: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>) -> Self {
         Self {
+            id: Uuid::new_v4(),
             source: value,
             size: 0,
             vectors: [None; PARTITION_CAP],
@@ -170,7 +172,7 @@ impl<
                 array::from_fn(move |_| tmp.next().unwrap())
             },
             centroid: value.centroid,
-            id: Uuid::new_v4(),
+            id: value.id,
         }
     }
 }
@@ -297,8 +299,11 @@ fn split_partition<
         .flatten()
         .collect();
     let (intra_graphs, new_inter_edges) = {
-        let mut intra_graphs: Vec<IntraPartitionGraph<A>> =
-            (0..(splits)).map(|_| IntraPartitionGraph::new()).collect();
+        let mut intra_graphs: Vec<IntraPartitionGraph<A>> = new_partitions
+            .iter()
+            .map(|x| IntraPartitionGraph::new(PartitionId(x.id)))
+            .collect();
+        // (0..(splits)).map(|_| IntraPartitionGraph::new()).collect();
 
         let mut new_inter_edges: Vec<((usize, VectorId), (usize, VectorId), A)> = Vec::new();
 
@@ -513,7 +518,7 @@ mod tests {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition = Partition::<TestField, TestVector, 500, 500>::new();
-        let mut intra_graph = IntraPartitionGraph::new();
+        let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
         inter_graph.add_node(PartitionId(partition.id));
 
         assert_eq!(inter_graph.1.len(), 1);
@@ -606,7 +611,7 @@ mod tests {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition = Partition::<TestField, TestVector, 500, 500>::new();
-        let mut intra_graph = IntraPartitionGraph::new();
+        let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
         inter_graph.add_node(PartitionId(partition.id));
 
         assert_eq!(inter_graph.1.len(), 1);

@@ -607,7 +607,7 @@ mod test {
     fn insert_one_vertex() {
         let mut inter_graph = InterPartitionGraph::new();
         let mut partition = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph = IntraPartitionGraph::new();
+        let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
 
         inter_graph.add_node(PartitionId(partition.id));
 
@@ -645,7 +645,7 @@ mod test {
     fn insert_multiple_vertex() {
         let mut inter_graph = InterPartitionGraph::new();
         let mut partition = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph = IntraPartitionGraph::new();
+        let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
 
         inter_graph.add_node(PartitionId(partition.id));
 
@@ -767,11 +767,11 @@ mod test {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_1 = IntraPartitionGraph::new();
+        let mut intra_graph_1 = IntraPartitionGraph::new(PartitionId(partition_1.id));
         inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_2 = IntraPartitionGraph::new();
+        let mut intra_graph_2 = IntraPartitionGraph::new(PartitionId(partition_2.id));
         inter_graph.add_node(PartitionId(partition_2.id));
 
         // Insert into partition
@@ -890,11 +890,11 @@ mod test {
         let mut inter_graph = InterPartitionGraph::new();
 
         let mut partition_1 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_1 = IntraPartitionGraph::new();
+        let mut intra_graph_1 = IntraPartitionGraph::new(PartitionId(partition_1.id));
         inter_graph.add_node(PartitionId(partition_1.id));
 
         let mut partition_2 = Partition::<f32, Vector<f32, 2>, 500, 500>::new();
-        let mut intra_graph_2 = IntraPartitionGraph::new();
+        let mut intra_graph_2 = IntraPartitionGraph::new(PartitionId(partition_2.id));
         inter_graph.add_node(PartitionId(partition_2.id));
 
         // Insert into partition
