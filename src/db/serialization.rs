@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
-use super::partition::{IntraPartitionGraph, Partition, VectorEntry};
+use super::partition::{component::graph::IntraPartitionGraph, Partition, VectorEntry};
 
 #[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {
