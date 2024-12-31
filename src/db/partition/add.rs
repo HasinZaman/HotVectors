@@ -1,11 +1,21 @@
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
+use std::{
+    any::Any,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 
 use petgraph::{
     adj::NodeIndex,
+    algo::min_spanning_tree,
     csr::DefaultIx,
     data::DataMap,
     graph::EdgeIndex,
-    visit::{EdgeRef, IntoEdgeReferences},
+    visit::{Data, EdgeRef, IntoEdgeReferences},
+};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
 };
 use uuid::Uuid;
 
@@ -15,8 +25,8 @@ use crate::{
 };
 
 use super::{
-    InterPartitionGraph, IntraPartitionGraph, Partition, PartitionErr, PartitionId, VectorEntry,
-    VectorId,
+    component::data_buffer::DataBuffer, meta::Meta, InterPartitionGraph, IntraPartitionGraph,
+    LoadedPartitions, Partition, PartitionErr, PartitionId, VectorEntry, VectorId,
 };
 
 enum EdgeType<A: Field<A>> {
@@ -322,22 +332,256 @@ pub async fn add<
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
+    const MAX_LOADED: usize,
 >(
-    target: &mut Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
     value: VectorEntry<A, B>,
-    intra_graph: &mut IntraPartitionGraph<A>,
 
-    inter_graph: &mut InterPartitionGraph<A>,
+    inter_graph: &mut RwLock<InterPartitionGraph<A>>,
 
-    neighbors: &[(
-        &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-        &mut IntraPartitionGraph<A>,
-    )],
+    partition_buffer: &mut RwLock<
+        DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, MAX_LOADED>,
+    >,
+    min_spanning_tree_buffer: &mut RwLock<DataBuffer<IntraPartitionGraph<A>, MAX_LOADED>>,
+
+    meta_data: &mut RwLock<HashMap<Uuid, RwLock<Meta<A, B>>>>,
 ) -> Result<(), PartitionErr>
 where
     A: PartialOrd + Ord,
+    VectorSerial<A>: From<B>,
+    A: for<'a> rkyv::Serialize<
+        rancor::Strategy<
+            rkyv::ser::Serializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::ser::sharing::Share,
+            >,
+            rancor::Error,
+        >,
+    >,
 {
-    todo!()
+    let meta_data = &mut *meta_data.write().await;
+    let mut partition_buffer = partition_buffer.write().await;
+    let min_spanning_tree_buffer = &mut *min_spanning_tree_buffer.write().await;
+    let inter_graph = &mut *inter_graph.write().await;
+
+    // find closet id
+    let closet_id = {
+        let mut meta_data = meta_data.iter();
+        let mut closest = {
+            let (_, data) = meta_data.next().unwrap();
+
+            let Meta { id, centroid, .. } = &*data.read().await;
+
+            (*id, B::dist(centroid, &value.vector))
+        };
+
+        for (_, data) in meta_data {
+            let Meta { id, centroid, .. } = &*data.read().await;
+
+            let dist = B::dist(centroid, &value.vector);
+
+            if closest.1 < dist {
+                closest = (*id, dist)
+            }
+        }
+
+        closest.0
+    };
+    // getting neighbor ids
+    let neighbor_ids: Vec<PartitionId> = inter_graph
+        .0
+        .edges(inter_graph.1[&closet_id])
+        .map(|edge| edge.weight())
+        .map(|edge| [edge.1 .0, edge.2 .0])
+        .flatten()
+        .collect::<HashSet<PartitionId>>()
+        .drain()
+        .collect();
+
+    // load partitions
+    let partition_buffer = &mut *partition_buffer;
+
+    let required_ids: Vec<&PartitionId> = [&closet_id]
+        .into_iter()
+        .chain(neighbor_ids.iter())
+        .collect();
+
+    // Allocate enough space by unloading least used resources
+    {
+        let required_ids: HashSet<&PartitionId> = required_ids.iter().map(|x| *x).collect();
+
+        let not_loaded: usize = required_ids
+            .iter()
+            .filter(|x| !partition_buffer.contains(**x))
+            .map(|x| *x)
+            .count();
+
+        if let Some(i1) = not_loaded.checked_sub(MAX_LOADED) {
+            // unload i1 elements
+            let unload_indexes: Vec<(usize, Uuid)> = partition_buffer
+                .least_used_iter()
+                .unwrap()
+                .filter(|(index, id)| !required_ids.contains(&PartitionId(*id)))
+                .take(i1)
+                .collect();
+
+            // sorting?
+            for (index, id) in unload_indexes {
+                partition_buffer.unload(&id);
+            }
+        }
+    }
+
+    let size = required_ids.len();
+    let mut partitions = Vec::with_capacity(size);
+    for id in required_ids {
+        partitions.push(partition_buffer.access(&*id).await.unwrap());
+    }
+
+    let target_partition = partitions.remove(0);
+    let mut target_partition = target_partition.write().await;
+
+    let mut neighbor_partitions = Vec::with_capacity(size - 1);
+
+    for partition in partitions.iter_mut().skip(1) {
+        neighbor_partitions.push(partition.read().await);
+    }
+    let neighbor_partitions = neighbor_partitions;
+    drop(partition_buffer);
+    drop(size);
+
+    // load min_spanning trees
+    let min_spanning_trees = &mut *min_spanning_tree_buffer;
+
+    let required_ids: Vec<&PartitionId> = [&closet_id]
+        .into_iter()
+        .chain(neighbor_ids.iter())
+        .collect();
+
+    // Allocate enough space by unloading least used resources
+    {
+        let required_ids: HashSet<&PartitionId> = required_ids.iter().map(|x| *x).collect();
+
+        let not_loaded: usize = required_ids
+            .iter()
+            .filter(|x| !min_spanning_trees.contains(**x))
+            .map(|x| *x)
+            .count();
+
+        if let Some(i1) = not_loaded.checked_sub(MAX_LOADED) {
+            // unload i1 elements
+            let unload_indexes: Vec<(usize, Uuid)> = min_spanning_trees
+                .least_used_iter()
+                .unwrap()
+                .filter(|(index, id)| !required_ids.contains(&PartitionId(*id)))
+                .take(i1)
+                .collect();
+
+            // sorting?
+            for (index, id) in unload_indexes {
+                min_spanning_trees.unload(&id);
+            }
+        }
+    }
+
+    let size = required_ids.len();
+    let mut trees = Vec::with_capacity(size);
+    for id in required_ids {
+        trees.push(min_spanning_trees.access(&*id).await.unwrap());
+    }
+
+    let target_tree = trees.remove(0);
+    let mut target_tree = target_tree.write().await;
+
+    let mut neighbor_trees = Vec::with_capacity(size - 1);
+
+    for tree in trees.iter_mut().skip(1) {
+        neighbor_trees.push(tree.write().await);
+    }
+    let mut neighbor_trees = neighbor_trees;
+    drop(min_spanning_trees);
+    drop(min_spanning_tree_buffer);
+    drop(size);
+
+    add_into(
+        &mut *target_partition,
+        value,
+        &mut *target_tree,
+        inter_graph,
+        &mut neighbor_partitions
+            .iter()
+            .map(|x| &**x)
+            .map(|x| x)
+            .zip(neighbor_trees.iter_mut().map(|x| &mut **x))
+            .map(|(x, y)| (x, y))
+            .collect::<Vec<(
+                &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                &mut IntraPartitionGraph<A>,
+            )>>(),
+    )
+}
+
+macro_rules! load_partitions {
+    (
+        $partition_buffer:expr,
+        $inter_graph:expr,
+        $closet_id:expr,
+        $max_loaded:expr
+    ) => {
+        let neighbor_ids: Vec<PartitionId> = $inter_graph
+            .0
+            .edges($inter_graph.1[&$closet_id])
+            .map(|edge| edge.weight())
+            .map(|edge| [edge.1 .0, edge.2 .0])
+            .flatten()
+            .collect::<HashSet<PartitionId>>()
+            .drain()
+            .collect();
+
+        let partition_buffer = &mut *$partition_buffer;
+
+        let required_ids: Vec<&PartitionId> = [&$closet_id]
+            .into_iter()
+            .chain(neighbor_ids.iter())
+            .collect();
+
+        {
+            let required_ids_set: HashSet<&PartitionId> = required_ids.iter().copied().collect();
+
+            let not_loaded = required_ids_set
+                .iter()
+                .filter(|id| !partition_buffer.contains(***id))
+                .count();
+
+            if let Some(to_unload) = not_loaded.checked_sub($max_loaded) {
+                let unload_indexes: Vec<(usize, Uuid)> = partition_buffer
+                    .least_used_iter()
+                    .unwrap()
+                    .filter(|(_, id)| !required_ids_set.contains(&PartitionId(*id)))
+                    .take(to_unload)
+                    .collect();
+
+                for (_, id) in unload_indexes {
+                    partition_buffer.unload(&id);
+                }
+            }
+        }
+
+        let mut partitions = Vec::with_capacity(required_ids.len());
+        for id in required_ids {
+            partitions.push(partition_buffer.access(id).await.unwrap());
+        }
+
+        let target_partition = partitions.remove(0);
+        let target_partition = target_partition.write().await;
+
+        let mut neighbor_partitions = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            neighbor_partitions.push(partition.read().await);
+        }
+
+        (target_partition, neighbor_partitions)
+    };
 }
 
 #[cfg(test)]

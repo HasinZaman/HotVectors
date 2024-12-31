@@ -169,21 +169,21 @@ pub async fn merge<
 
     partition_access: &mut LoadedPartitions<A, B, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>,
 ) -> Result<(), PartitionErr> {
-    let partition_1 = match partition_access.access(&partition_1).await {
-        Ok(partition) => partition,
-        Err(_) => todo!(),
-    };
+    // let partition_1 = match partition_access.access(&partition_1).await {
+    //     Ok(partition) => partition,
+    //     Err(_) => todo!(),
+    // };
 
-    let mut partition_1 = partition_1.write().unwrap();
+    // let mut partition_1 = partition_1.write().unwrap();
 
-    let Some(partition_1) = partition_1.as_mut() else {
-        todo!()
-    };
+    // let Some(partition_1) = partition_1.as_mut() else {
+    //     todo!()
+    // };
 
-    let (mut partition_2, inter_graph_2) = match partition_access.remove(&partition_2).await {
-        Ok(partition) => partition,
-        Err(_) => todo!(),
-    };
+    // let (mut partition_2, inter_graph_2) = match partition_access.remove(&partition_2).await {
+    //     Ok(partition) => partition,
+    //     Err(_) => todo!(),
+    // };
     todo!()
     // merge_into(
     //     &mut partition_1.0,

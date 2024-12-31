@@ -210,7 +210,7 @@ fn split_partition<
     PartitionErr,
 > {
     if target.size < splits {
-        return Err(PartitionErr::InsufficientSizeForSplits)
+        return Err(PartitionErr::InsufficientSizeForSplits);
     }
 
     if target.size == splits {
