@@ -13,14 +13,12 @@ use rancor::{fail, Source};
 use uuid::Uuid;
 
 use crate::{
-    db::partition::{self, VectorId},
+    db::{component::{graph::{InterPartitionGraph, IntraPartitionGraph}, ids::{PartitionId, VectorId}, partition::{Partition, PartitionErr}}, operations::{self}},
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
-use super::{
-    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr,
-    PartitionId, VectorEntry,
-};
+use super::LoadedPartitions;
+
 
 struct PartitionSubSet<
     'a,
@@ -500,13 +498,12 @@ pub async fn split<
 
 #[cfg(test)]
 mod tests {
-    use partition::add::add_into;
+    use operations::add::add_into;
     use uuid::Uuid;
 
     use super::*;
     use crate::{
-        db::partition::{VectorId, VectorSpace},
-        vector::{Extremes, Vector, VectorSerial},
+        db::component::partition::VectorEntry, vector::Vector
     };
 
     #[test]

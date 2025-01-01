@@ -6,11 +6,10 @@ use petgraph::{
 };
 use tokio::try_join;
 
-use crate::vector::{Field, VectorSerial, VectorSpace};
+use crate::{db::component::{graph::IntraPartitionGraph, ids::{PartitionId, VectorId}, partition::{Partition, PartitionErr, VectorEntry}}, vector::{Field, VectorSerial, VectorSpace}};
 
 use super::{
-    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr,
-    PartitionId, VectorEntry, VectorId,
+    InterPartitionGraph, LoadedPartitions,
 };
 
 // TESTABLE
@@ -203,12 +202,11 @@ mod test {
     use uuid::Uuid;
 
     use crate::{
-        db::partition::{
+        db::{component::{graph::IntraPartitionGraph, ids::{PartitionId, VectorId}, partition::{Partition, VectorEntry}}, operations::{
             add::add_into,
-            merge::{self, merge_into},
-            InterPartitionGraph, IntraPartitionGraph, Partition, PartitionId, VectorEntry,
-            VectorId,
-        },
+            merge::merge_into,
+            InterPartitionGraph,
+        }},
         vector::{Field, Vector, VectorSerial, VectorSpace},
     };
 

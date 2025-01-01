@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 
 use crate::vector::{Field, VectorSpace};
 
-use super::PartitionId;
+use super::ids::PartitionId;
 
 #[derive(Clone)]
 pub struct Meta<A: Field<A>, B: VectorSpace<A> + Clone> {

@@ -4,7 +4,7 @@ use petgraph::{csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, Undirecte
 use uuid::Uuid;
 
 use crate::{
-    db::partition::{PartitionId, VectorId},
+    db::component::ids::{PartitionId, VectorId},
     vector::Field,
 };
 use rkyv::{Archive, Deserialize, Serialize};
@@ -84,7 +84,7 @@ impl<'a, A: Field<A>> Into<Uuid> for &'a IntraPartitionGraph<A> {
 pub struct GraphSerial<A> {
     ids: Vec<String>,
     connections: Vec<(usize, usize, A)>,
-    id: String
+    id: String,
 }
 
 impl<A> FileExtension for GraphSerial<A> {
@@ -95,26 +95,39 @@ impl<A> FileExtension for GraphSerial<A> {
 
 impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for GraphSerial<A> {
     fn from(value: IntraPartitionGraph<A>) -> Self {
-        let id_to_index_map: HashMap<VectorId, usize> = value.1.iter()
+        let id_to_index_map: HashMap<VectorId, usize> = value
+            .1
+            .iter()
             .map(|(id, _)| id)
             .enumerate()
             .map(|(index, id)| (*id, index))
             .collect();
 
         GraphSerial {
-            ids: value.1.iter()
+            ids: value
+                .1
+                .iter()
                 .map(|(id, _)| id)
                 .map(|x| x.to_string())
                 .collect(),
-            connections: value.0.edge_indices()
-                .map(|index| (value.0.edge_endpoints(index).unwrap(), value.0.edge_weight(index).unwrap()))
-                .map(|((start, end), weight)| (
-                    id_to_index_map[value.0.node_weight(start).unwrap()],
-                    id_to_index_map[value.0.node_weight(end).unwrap()],
-                    *weight
-                ))
+            connections: value
+                .0
+                .edge_indices()
+                .map(|index| {
+                    (
+                        value.0.edge_endpoints(index).unwrap(),
+                        value.0.edge_weight(index).unwrap(),
+                    )
+                })
+                .map(|((start, end), weight)| {
+                    (
+                        id_to_index_map[value.0.node_weight(start).unwrap()],
+                        id_to_index_map[value.0.node_weight(end).unwrap()],
+                        *weight,
+                    )
+                })
                 .collect(),
-            id: (*value.2).to_string()
+            id: (*value.2).to_string(),
         }
     }
 }
@@ -151,7 +164,7 @@ impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A>
         Self(
             graph,
             uuid_to_index,
-            PartitionId(Uuid::from_str(&value.id).unwrap())
+            PartitionId(Uuid::from_str(&value.id).unwrap()),
         )
     }
 }

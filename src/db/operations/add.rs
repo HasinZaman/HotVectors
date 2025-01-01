@@ -1,8 +1,6 @@
 use std::{
-    any::Any,
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    fmt::Debug,
 };
 
 use petgraph::{
@@ -13,37 +11,29 @@ use petgraph::{
     graph::EdgeIndex,
     visit::{Data, EdgeRef, IntoEdgeReferences},
 };
+
 use tokio::{
-    sync::{Mutex, RwLock},
-    task::JoinSet,
+    sync::RwLock,
 };
 use uuid::Uuid;
 
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
-    de::Pool,
-    from_bytes, rancor,
+    de::Pool, rancor,
     rend::u32_le,
-    to_bytes,
     tuple::ArchivedTuple3,
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
-    Archive, Deserialize, DeserializeUnsized,
+    Archive, DeserializeUnsized,
 };
 
 use crate::{
-    db::{
-        partition,
-        serialization::{ArchivedVectorEntrySerial, PartitionSerial, VectorEntrySerial},
-    },
+    db::component::{data_buffer::DataBuffer, graph::{GraphSerial, IntraPartitionGraph}, ids::{PartitionId, VectorId}, meta::Meta, partition::{ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry, VectorEntrySerial}},
     vector::{Field, VectorSerial, VectorSpace},
 };
 
 use super::{
-    component::{data_buffer::DataBuffer, graph::GraphSerial},
-    meta::Meta,
-    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr,
-    PartitionId, VectorEntry, VectorId,
+    InterPartitionGraph,
 };
 
 enum EdgeType<A: Field<A>> {
@@ -572,13 +562,14 @@ where
 #[cfg(test)]
 mod test {
     use petgraph::visit::EdgeRef;
-    use rkyv::vec;
     use uuid::Uuid;
 
     use crate::{
-        db::partition::{
-            self, add::add_into, InterPartitionGraph, IntraPartitionGraph, Partition, PartitionId,
-            VectorEntry, VectorId,
+        db::{
+            self,
+            component::{
+                graph::{InterPartitionGraph, IntraPartitionGraph}, ids::{PartitionId, VectorId}, partition::{Partition, VectorEntry}
+            }, operations::add::add_into,
         },
         vector::{self, Vector, VectorSpace},
     };

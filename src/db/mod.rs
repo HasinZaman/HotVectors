@@ -7,12 +7,8 @@ use std::{
     },
 };
 
-use crate::{
-    db::partition::{LoadedPartitions, Partition},
-    vector::VectorSerial,
-};
+use crate::{db::operations::LoadedPartitions, vector::VectorSerial};
 use log::{Log, State};
-use partition::{Error, VectorEntry};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -32,8 +28,8 @@ use uuid::Uuid;
 use crate::vector::{Extremes, Field, VectorSpace};
 
 pub mod log;
-pub mod partition;
-pub mod serialization;
+pub mod operations;
+pub mod component;
 
 pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
     // transaction commands

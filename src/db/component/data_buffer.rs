@@ -23,9 +23,7 @@ use rkyv::{
     Archive, Deserialize, DeserializeUnsized,
 };
 
-use crate::db::partition::PartitionErr;
-
-use super::serial::FileExtension;
+use super::{partition::PartitionErr, serial::FileExtension};
 
 pub struct LeastUsedIterator(Vec<(usize, usize, Uuid)>);
 
