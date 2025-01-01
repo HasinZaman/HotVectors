@@ -1,10 +1,5 @@
 use std::{
-    array,
-    borrow::BorrowMut,
-    collections::HashMap,
-    marker::PhantomData,
-    mem::{self, swap},
-    sync::Arc,
+    array, collections::HashMap, error::Error, fmt::Display, marker::PhantomData, mem::{self, swap}, sync::Arc
 };
 
 use heapify::{make_heap_with, pop_heap_with};
@@ -23,7 +18,44 @@ use rkyv::{
     Archive, Deserialize, DeserializeUnsized,
 };
 
-use super::{partition::PartitionErr, serial::FileExtension};
+use super::{serial::FileExtension};
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum BufferError{
+    OutOfSpace,
+    DataNotFound
+}
+
+impl From<rancor::Error> for BufferError {
+    fn from(value: rancor::Error) -> Self {
+        todo!()
+    }
+}
+
+impl From<std::io::Error> for BufferError {
+    fn from(value: std::io::Error) -> Self {
+        todo!()
+    }
+}
+
+impl Display for BufferError{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+impl Error for BufferError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        todo!()
+    }
+
+    fn description(&self) -> &str {
+        todo!()
+    }
+
+    fn cause(&self) -> Option<&dyn Error> {
+        todo!()
+    }
+}
 
 pub struct LeastUsedIterator(Vec<(usize, usize, Uuid)>);
 
@@ -115,23 +147,23 @@ where
     }
 
     // access data from buffer
-    pub fn try_access(&mut self, id: &Uuid) -> Result<RwLock<A>, PartitionErr> {
+    pub fn try_access(&mut self, id: &Uuid) -> Result<RwLock<A>, BufferError> {
         todo!()
     }
 
     pub async fn max_try_access<const MAX: usize>(
         &mut self,
         id: &Uuid,
-    ) -> Result<RwLock<A>, PartitionErr> {
+    ) -> Result<RwLock<A>, BufferError> {
         todo!()
     }
 
-    pub async fn access(&mut self, id: &Uuid) -> Result<Arc<RwLock<Option<A>>>, PartitionErr> {
+    pub async fn access(&mut self, id: &Uuid) -> Result<Arc<RwLock<Option<A>>>, BufferError> {
         let index_map = &*self.index_map.read().await;
 
         let index = match index_map.get(id) {
             Some(index) => *index,
-            None => return Err(todo!()),
+            None => return Err(BufferError::DataNotFound),
         };
 
         let Some((_prev, cur)) = &mut *self.used_stack[index].write().await else {
@@ -195,11 +227,11 @@ where
     }
 
     // insert values into the data_buffer
-    pub async fn push(&mut self, value: A) -> Result<(), PartitionErr> {
+    pub async fn push(&mut self, value: A) -> Result<(), BufferError> {
         let buffer_size = &mut *self.buffer_size.write().await;
 
         if *buffer_size + 1 >= CAP {
-            return Err(todo!());
+            return Err(BufferError::OutOfSpace);
         };
 
         let index = *buffer_size;
@@ -228,11 +260,11 @@ where
         Ok(())
     }
 
-    pub async fn load(&mut self, id: &Uuid) -> Result<(), PartitionErr> {
+    pub async fn load(&mut self, id: &Uuid) -> Result<(), BufferError> {
         let buffer_size = &mut *self.buffer_size.write().await;
 
         if *buffer_size + 1 >= CAP {
-            return Err(todo!());
+            return Err(BufferError::OutOfSpace);
         }
 
         let empty_index_stack = &mut *self.empty_index_stack.write().await;
@@ -253,10 +285,9 @@ where
                 id.to_string(),
                 B::extension()
             ))
-            .await
-            .unwrap();
+            .await?;
 
-            from_bytes::<B, rancor::Error>(&bytes).unwrap().into()
+            from_bytes::<B, rancor::Error>(&bytes)?.into()
         };
 
         // insert value
@@ -275,13 +306,15 @@ where
     }
 
     // remove values from the data_buffer
-    pub async fn remove(&mut self, id: &Uuid) -> Result<(), PartitionErr> {
+    pub async fn remove(&mut self, id: &Uuid) -> Result<(), BufferError> {
         // get access to all locks
         let mut index_map = self.index_map.write().await;
 
         let index = match index_map.get(id) {
             Some(index) => *index,
-            None => todo!(),
+            None => {
+                return Err(BufferError::DataNotFound)
+            },
         };
         let used_stack = &mut *self.used_stack[index].write().await;
 
@@ -306,13 +339,15 @@ where
         Ok(())
     }
 
-    pub async fn unload(&mut self, id: &Uuid) -> Result<(), PartitionErr> {
+    pub async fn unload(&mut self, id: &Uuid) -> Result<(), BufferError> {
         // get access to all locks
         let mut index_map = self.index_map.write().await;
 
         let index = match index_map.get(id) {
             Some(index) => *index,
-            None => todo!(),
+            None => {
+                return Err(BufferError::DataNotFound)
+            },
         };
         let used_stack = &mut *self.used_stack[index].write().await;
 
@@ -339,14 +374,13 @@ where
         // Export value
         let serial_value: B = value.into();
 
-        let bytes = to_bytes::<rancor::Error>(&serial_value).unwrap();
+        let bytes = to_bytes::<rancor::Error>(&serial_value)?;
 
         tokio::fs::write(
             &format!("{}//{}.{}", self.source, id.to_string(), B::extension()),
             bytes.as_slice(),
         )
-        .await
-        .unwrap();
+        .await?;
 
         Ok(())
     }
