@@ -6,13 +6,22 @@ use uuid::Uuid;
 
 use crate::vector::{Field, VectorSerial, VectorSpace};
 
-use super::partition::{component::graph::IntraPartitionGraph, Partition, VectorEntry};
+use super::partition::{
+    component::{graph::IntraPartitionGraph, serial::FileExtension},
+    Partition, VectorEntry,
+};
 
 #[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {
     vectors: Vec<VectorEntrySerial<A>>,
     centroid: VectorSerial<A>,
     id: String,
+}
+
+impl<A: PartialEq + Clone + Copy + Field<A>> FileExtension for PartitionSerial<A> {
+    fn extension() -> &'static str {
+        "partition"
+    }
 }
 
 impl<
@@ -78,6 +87,7 @@ impl<A: Clone + Copy + Field<A>, B: Clone + Copy + Into<VectorSerial<A>> + Vecto
         }
     }
 }
+
 impl<
         A: Clone + Copy + Field<A>,
         B: PartialEq + Clone + Copy + From<VectorSerial<A>> + VectorSpace<A>,

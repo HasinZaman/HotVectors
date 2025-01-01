@@ -19,14 +19,31 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use rancor::Strategy;
+use rkyv::{
+    bytecheck::CheckBytes,
+    de::Pool,
+    from_bytes, rancor,
+    rend::u32_le,
+    to_bytes,
+    tuple::ArchivedTuple3,
+    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
+    Archive, Deserialize, DeserializeUnsized,
+};
+
 use crate::{
-    db::partition,
+    db::{
+        partition,
+        serialization::{ArchivedVectorEntrySerial, PartitionSerial, VectorEntrySerial},
+    },
     vector::{Field, VectorSerial, VectorSpace},
 };
 
 use super::{
-    component::data_buffer::DataBuffer, meta::Meta, InterPartitionGraph, IntraPartitionGraph,
-    LoadedPartitions, Partition, PartitionErr, PartitionId, VectorEntry, VectorId,
+    component::{data_buffer::DataBuffer, graph::GraphSerial},
+    meta::Meta,
+    InterPartitionGraph, IntraPartitionGraph, LoadedPartitions, Partition, PartitionErr,
+    PartitionId, VectorEntry, VectorId,
 };
 
 enum EdgeType<A: Field<A>> {
@@ -339,9 +356,11 @@ pub async fn add<
     inter_graph: &mut RwLock<InterPartitionGraph<A>>,
 
     partition_buffer: &mut RwLock<
-        DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, MAX_LOADED>,
+        DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
     >,
-    min_spanning_tree_buffer: &mut RwLock<DataBuffer<IntraPartitionGraph<A>, MAX_LOADED>>,
+    min_spanning_tree_buffer: &mut RwLock<
+        DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, MAX_LOADED>,
+    >,
 
     meta_data: &mut RwLock<HashMap<Uuid, RwLock<Meta<A, B>>>>,
 ) -> Result<(), PartitionErr>
@@ -358,6 +377,13 @@ where
             rancor::Error,
         >,
     >,
+    for<'a> <A as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    [ArchivedVectorEntrySerial<A>]:
+        DeserializeUnsized<[VectorEntrySerial<A>], Strategy<Pool, rancor::Error>>,
+    [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+    [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
+        DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
 {
     let meta_data = &mut *meta_data.write().await;
     let mut partition_buffer = partition_buffer.write().await;
@@ -410,24 +436,30 @@ where
     {
         let required_ids: HashSet<&PartitionId> = required_ids.iter().map(|x| *x).collect();
 
-        let not_loaded: usize = required_ids
-            .iter()
-            .filter(|x| !partition_buffer.contains(**x))
-            .map(|x| *x)
-            .count();
+        let not_loaded: usize = {
+            let index_map = &*partition_buffer.index_map.read().await;
+
+            required_ids
+                .iter()
+                .filter(|x| !index_map.contains_key(**x))
+                .map(|x| *x)
+                .count()
+        };
 
         if let Some(i1) = not_loaded.checked_sub(MAX_LOADED) {
             // unload i1 elements
             let unload_indexes: Vec<(usize, Uuid)> = partition_buffer
                 .least_used_iter()
+                .await
                 .unwrap()
-                .filter(|(index, id)| !required_ids.contains(&PartitionId(*id)))
+                .filter(|(_index, id)| !required_ids.contains(&PartitionId(*id)))
                 .take(i1)
                 .collect();
 
             // sorting?
-            for (index, id) in unload_indexes {
-                partition_buffer.unload(&id);
+            for (_index, id) in unload_indexes {
+                // batch drop
+                let _ = partition_buffer.unload(&id).await;
             }
         }
     }
@@ -439,7 +471,9 @@ where
     }
 
     let target_partition = partitions.remove(0);
-    let mut target_partition = target_partition.write().await;
+    let Some(target_partition) = &mut *target_partition.write().await else {
+        todo!();
+    };
 
     let mut neighbor_partitions = Vec::with_capacity(size - 1);
 
@@ -462,24 +496,30 @@ where
     {
         let required_ids: HashSet<&PartitionId> = required_ids.iter().map(|x| *x).collect();
 
-        let not_loaded: usize = required_ids
-            .iter()
-            .filter(|x| !min_spanning_trees.contains(**x))
-            .map(|x| *x)
-            .count();
+        let not_loaded: usize = {
+            let index_map = &*min_spanning_trees.index_map.read().await;
+
+            required_ids
+                .iter()
+                .filter(|x| !index_map.contains_key(**x))
+                .map(|x| *x)
+                .count()
+        };
 
         if let Some(i1) = not_loaded.checked_sub(MAX_LOADED) {
             // unload i1 elements
             let unload_indexes: Vec<(usize, Uuid)> = min_spanning_trees
                 .least_used_iter()
+                .await
                 .unwrap()
-                .filter(|(index, id)| !required_ids.contains(&PartitionId(*id)))
+                .filter(|(_index, id)| !required_ids.contains(&PartitionId(*id)))
                 .take(i1)
                 .collect();
 
             // sorting?
-            for (index, id) in unload_indexes {
-                min_spanning_trees.unload(&id);
+            for (_index, id) in unload_indexes {
+                // replace unload with batch unload
+                let _ = min_spanning_trees.unload(&id).await;
             }
         }
     }
@@ -491,7 +531,9 @@ where
     }
 
     let target_tree = trees.remove(0);
-    let mut target_tree = target_tree.write().await;
+    let Some(target_tree) = &mut *target_tree.write().await else {
+        todo!();
+    };
 
     let mut neighbor_trees = Vec::with_capacity(size - 1);
 
@@ -514,74 +556,17 @@ where
             .map(|x| x)
             .zip(neighbor_trees.iter_mut().map(|x| &mut **x))
             .map(|(x, y)| (x, y))
+            .map(|(x, y)| {
+                let Some(x) = x else { todo!() };
+                let Some(y) = y else { todo!() };
+
+                (x, y)
+            })
             .collect::<Vec<(
                 &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
                 &mut IntraPartitionGraph<A>,
             )>>(),
     )
-}
-
-macro_rules! load_partitions {
-    (
-        $partition_buffer:expr,
-        $inter_graph:expr,
-        $closet_id:expr,
-        $max_loaded:expr
-    ) => {
-        let neighbor_ids: Vec<PartitionId> = $inter_graph
-            .0
-            .edges($inter_graph.1[&$closet_id])
-            .map(|edge| edge.weight())
-            .map(|edge| [edge.1 .0, edge.2 .0])
-            .flatten()
-            .collect::<HashSet<PartitionId>>()
-            .drain()
-            .collect();
-
-        let partition_buffer = &mut *$partition_buffer;
-
-        let required_ids: Vec<&PartitionId> = [&$closet_id]
-            .into_iter()
-            .chain(neighbor_ids.iter())
-            .collect();
-
-        {
-            let required_ids_set: HashSet<&PartitionId> = required_ids.iter().copied().collect();
-
-            let not_loaded = required_ids_set
-                .iter()
-                .filter(|id| !partition_buffer.contains(***id))
-                .count();
-
-            if let Some(to_unload) = not_loaded.checked_sub($max_loaded) {
-                let unload_indexes: Vec<(usize, Uuid)> = partition_buffer
-                    .least_used_iter()
-                    .unwrap()
-                    .filter(|(_, id)| !required_ids_set.contains(&PartitionId(*id)))
-                    .take(to_unload)
-                    .collect();
-
-                for (_, id) in unload_indexes {
-                    partition_buffer.unload(&id);
-                }
-            }
-        }
-
-        let mut partitions = Vec::with_capacity(required_ids.len());
-        for id in required_ids {
-            partitions.push(partition_buffer.access(id).await.unwrap());
-        }
-
-        let target_partition = partitions.remove(0);
-        let target_partition = target_partition.write().await;
-
-        let mut neighbor_partitions = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            neighbor_partitions.push(partition.read().await);
-        }
-
-        (target_partition, neighbor_partitions)
-    };
 }
 
 #[cfg(test)]
