@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use petgraph::{csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, Undirected};
 use uuid::Uuid;
@@ -84,6 +84,7 @@ impl<'a, A: Field<A>> Into<Uuid> for &'a IntraPartitionGraph<A> {
 pub struct GraphSerial<A> {
     ids: Vec<String>,
     connections: Vec<(usize, usize, A)>,
+    id: String
 }
 
 impl<A> FileExtension for GraphSerial<A> {
@@ -94,33 +95,39 @@ impl<A> FileExtension for GraphSerial<A> {
 
 impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for GraphSerial<A> {
     fn from(value: IntraPartitionGraph<A>) -> Self {
+        let id_to_index_map: HashMap<VectorId, usize> = value.1.iter()
+            .map(|(id, _)| id)
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+
         GraphSerial {
-            ids: todo!(),
-            connections: todo!(), // ids: value
-                                  //     .0
-                                  //     .raw_nodes()
-                                  //     .iter()
-                                  //     .map(|node| node.weight.to_string())
-                                  //     .collect::<Vec<String>>(),
-                                  // connections: value
-                                  //     .0
-                                  //     .raw_edges()
-                                  //     .iter()
-                                  //     .map(|edge| (edge.source().index(), edge.target().index(), edge.weight))
-                                  //     .collect::<Vec<(usize, usize, A)>>(),
+            ids: value.1.iter()
+                .map(|(id, _)| id)
+                .map(|x| x.to_string())
+                .collect(),
+            connections: value.0.edge_indices()
+                .map(|index| (value.0.edge_endpoints(index).unwrap(), value.0.edge_weight(index).unwrap()))
+                .map(|((start, end), weight)| (
+                    id_to_index_map[value.0.node_weight(start).unwrap()],
+                    id_to_index_map[value.0.node_weight(end).unwrap()],
+                    *weight
+                ))
+                .collect(),
+            id: (*value.2).to_string()
         }
     }
 }
 
 impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A> {
     fn from(value: GraphSerial<A>) -> Self {
-        let mut graph: StableGraph<Uuid, A, Undirected> = todo!();
+        let mut graph: StableGraph<VectorId, A, Undirected> = StableGraph::default();
         let mut uuid_to_index = HashMap::new();
 
         value
             .ids
             .iter()
-            .map(|id| Uuid::from_str(id).unwrap())
+            .map(|id| VectorId(Uuid::from_str(id).unwrap()))
             .for_each(|id| {
                 let idx = graph.add_node(id);
 
@@ -130,10 +137,10 @@ impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A>
         value
             .connections
             .iter()
-            .map(|(i1, i2, weight)| {
+            .map(|(start_index, end_index, weight)| {
                 (
-                    uuid_to_index[&Uuid::from_str(&value.ids[*i1]).unwrap()],
-                    uuid_to_index[&Uuid::from_str(&value.ids[*i2]).unwrap()],
+                    uuid_to_index[&VectorId(Uuid::from_str(&value.ids[*start_index]).unwrap())],
+                    uuid_to_index[&VectorId(Uuid::from_str(&value.ids[*end_index]).unwrap())],
                     weight,
                 )
             })
@@ -141,7 +148,10 @@ impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A>
                 graph.add_edge(id1, id2, *weight);
             });
 
-        todo!()
-        // IntraPartitionGraph(todo!(), todo!())
+        Self(
+            graph,
+            uuid_to_index,
+            PartitionId(Uuid::from_str(&value.id).unwrap())
+        )
     }
 }
