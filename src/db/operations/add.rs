@@ -403,6 +403,9 @@ where
 
         closest.0
     };
+    // get meta data
+    let target_meta = &mut *meta_data[&*closet_id].write().await;
+
     // getting neighbor ids
     let neighbor_ids: Vec<PartitionId> = inter_graph
         .0
@@ -535,7 +538,7 @@ where
     drop(min_spanning_tree_buffer);
     drop(size);
 
-    add_into(
+    let result =  add_into(
         &mut *target_partition,
         value,
         &mut *target_tree,
@@ -556,7 +559,13 @@ where
                 &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
                 &mut IntraPartitionGraph<A>,
             )>>(),
-    )
+    );
+
+    if let Ok(_) = result {
+        target_meta.centroid = target_partition.centroid();
+    }
+
+    result
 }
 
 #[cfg(test)]
