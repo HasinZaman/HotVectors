@@ -40,8 +40,11 @@ use super::component::{graph::InterPartitionGraph, meta::Meta};
 
 // atomic/async operations
 pub mod add;
+pub mod knn;
 pub mod merge;
 pub mod split;
+
+pub mod read;
 
 const SOURCE_DIR: &str = "partitions";
 const META_DIR: &str = "partitions";

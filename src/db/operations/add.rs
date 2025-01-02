@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    sync::Arc,
 };
 
 use petgraph::{
@@ -12,15 +13,14 @@ use petgraph::{
     visit::{Data, EdgeRef, IntoEdgeReferences},
 };
 
-use tokio::{
-    sync::RwLock,
-};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
-    de::Pool, rancor,
+    de::Pool,
+    rancor,
     rend::u32_le,
     tuple::ArchivedTuple3,
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
@@ -28,13 +28,23 @@ use rkyv::{
 };
 
 use crate::{
-    db::component::{data_buffer::DataBuffer, graph::{GraphSerial, IntraPartitionGraph}, ids::{PartitionId, VectorId}, meta::Meta, partition::{ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry, VectorEntrySerial}},
-    vector::{Field, VectorSerial, VectorSpace},
+    db::{
+        component::{
+            data_buffer::DataBuffer,
+            graph::{GraphSerial, IntraPartitionGraph},
+            ids::{PartitionId, VectorId},
+            meta::Meta,
+            partition::{
+                ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
+                VectorEntrySerial,
+            },
+        },
+        operations::split::split_partition,
+    },
+    vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
-use super::{
-    InterPartitionGraph,
-};
+use super::InterPartitionGraph;
 
 enum EdgeType<A: Field<A>> {
     Internal(A, A, EdgeIndex<DefaultIx>, VectorId, VectorId),
@@ -336,23 +346,25 @@ where
 
 pub async fn add<
     A: PartialEq + Clone + Copy + Field<A>,
-    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
+    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
 >(
     value: VectorEntry<A, B>,
 
-    inter_graph: &mut RwLock<InterPartitionGraph<A>>,
+    inter_graph: Arc<RwLock<InterPartitionGraph<A>>>,
 
-    partition_buffer: &mut RwLock<
-        DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
+    partition_buffer: Arc<
+        RwLock<
+            DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
+        >,
     >,
-    min_spanning_tree_buffer: &mut RwLock<
-        DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, MAX_LOADED>,
+    min_spanning_tree_buffer: Arc<
+        RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, MAX_LOADED>>,
     >,
 
-    meta_data: &mut RwLock<HashMap<Uuid, RwLock<Meta<A, B>>>>,
+    meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
 ) -> Result<(), PartitionErr>
 where
     A: PartialOrd + Ord,
@@ -403,8 +415,6 @@ where
 
         closest.0
     };
-    // get meta data
-    let target_meta = &mut *meta_data[&*closet_id].write().await;
 
     // getting neighbor ids
     let neighbor_ids: Vec<PartitionId> = inter_graph
@@ -474,7 +484,7 @@ where
         neighbor_partitions.push(partition.read().await);
     }
     let neighbor_partitions = neighbor_partitions;
-    drop(partition_buffer);
+    // drop(partition_buffer);
     drop(size);
 
     // load min_spanning trees
@@ -535,13 +545,14 @@ where
     }
     let mut neighbor_trees = neighbor_trees;
     drop(min_spanning_trees);
-    drop(min_spanning_tree_buffer);
+    // drop(min_spanning_tree_buffer);
     drop(size);
 
-    let result =  add_into(
-        &mut *target_partition,
-        value,
-        &mut *target_tree,
+    // should  do error checking (Might require splitting)
+    let result = add_into(
+        target_partition,
+        value.clone(),
+        target_tree,
         inter_graph,
         &mut neighbor_partitions
             .iter()
@@ -561,11 +572,149 @@ where
             )>>(),
     );
 
-    if let Ok(_) = result {
-        target_meta.centroid = target_partition.centroid();
-    }
+    match result {
+        Ok(_) => {
+            // get meta data
+            let target_meta = &mut *meta_data[&*closet_id].write().await;
 
-    result
+            target_meta.centroid = target_partition.centroid();
+            target_meta.size += 1;
+        }
+        Err(PartitionErr::Overflow) => {
+            let Ok(mut new_splits) = split_partition(target_partition, target_tree, 2, inter_graph)
+            else {
+                panic!()
+            };
+
+            let (mut new_partition, mut new_graph) = new_splits.remove(0);
+
+            // find newest closet_partition
+            let new_partition_dist = B::dist(&value.vector, &new_partition.centroid());
+            let target_partition_dist = B::dist(&value.vector, &target_partition.centroid());
+            if new_partition_dist < target_partition_dist {
+                let neighbor_ids: HashSet<Uuid> = inter_graph
+                    .0
+                    .edges(inter_graph.1[&PartitionId(new_partition.id)])
+                    .map(|edge_index| edge_index.weight())
+                    .map(|(_, (id_1, _), (id_2, _))| [id_1, id_2])
+                    .flatten()
+                    .map(|x| **x)
+                    .collect();
+
+                let target_partition = &*target_partition;
+                let target_tree = target_tree;
+
+                add_into(
+                    &mut new_partition,
+                    value,
+                    &mut new_graph,
+                    inter_graph,
+                    &mut neighbor_partitions
+                        .iter()
+                        .map(|x| &**x)
+                        .map(|x| x)
+                        .zip(neighbor_trees.iter_mut().map(|x| &mut **x))
+                        .map(|(x, y)| (x, y))
+                        .map(|(x, y)| {
+                            let Some(x) = x else { todo!() };
+                            let Some(y) = y else { todo!() };
+
+                            (x, y)
+                        })
+                        .chain([(target_partition, target_tree)].into_iter())
+                        .filter(|(partition, _)| neighbor_ids.contains(&partition.id))
+                        .collect::<Vec<(
+                            &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                            &mut IntraPartitionGraph<A>,
+                        )>>(),
+                )
+                .unwrap();
+            } else {
+                let neighbor_ids: HashSet<Uuid> = inter_graph
+                    .0
+                    .edges(inter_graph.1[&PartitionId(target_partition.id)])
+                    .map(|edge_index| edge_index.weight())
+                    .map(|(_, (id_1, _), (id_2, _))| [id_1, id_2])
+                    .flatten()
+                    .map(|x| **x)
+                    .collect();
+
+                add_into(
+                    target_partition,
+                    value,
+                    target_tree,
+                    inter_graph,
+                    &mut neighbor_partitions
+                        .iter()
+                        .map(|x| &**x)
+                        .map(|x| x)
+                        .zip(neighbor_trees.iter_mut().map(|x| &mut **x))
+                        .map(|(x, y)| (x, y))
+                        .map(|(x, y)| {
+                            let Some(x) = x else { todo!() };
+                            let Some(y) = y else { todo!() };
+
+                            (x, y)
+                        })
+                        .chain([(&new_partition, &mut new_graph)].into_iter())
+                        .filter(|(p, t)| neighbor_ids.contains(&p.id))
+                        .collect::<Vec<(
+                            &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                            &mut IntraPartitionGraph<A>,
+                        )>>(),
+                )
+                .unwrap();
+            }
+
+            // add to meta_data
+            meta_data.insert(
+                new_partition.id,
+                Arc::new(RwLock::new(Meta {
+                    id: PartitionId(new_partition.id),
+                    size: new_partition.size,
+                    centroid: new_partition.centroid(),
+                    _phantom_data: std::marker::PhantomData,
+                })),
+            );
+            {
+                // get meta data
+                let target_meta = &mut *meta_data[&*closet_id].write().await;
+
+                target_meta.size = target_partition.size;
+                target_meta.centroid = target_partition.centroid();
+            }
+
+            // push to partition_buffer
+            if let Err(_) = partition_buffer.push(new_partition.clone()).await {
+                let (_index, id) = partition_buffer
+                    .least_used_iter()
+                    .await
+                    .unwrap()
+                    .next()
+                    .unwrap();
+
+                partition_buffer.unload(&id).await.unwrap();
+
+                partition_buffer.push(new_partition).await.unwrap();
+            }
+
+            // push to min_span_buffer
+            if let Err(_) = min_spanning_tree_buffer.push(new_graph.clone()).await {
+                let (_index, id) = min_spanning_tree_buffer
+                    .least_used_iter()
+                    .await
+                    .unwrap()
+                    .next()
+                    .unwrap();
+
+                min_spanning_tree_buffer.unload(&id).await.unwrap();
+
+                min_spanning_tree_buffer.push(new_graph).await.unwrap();
+            }
+        }
+        Err(_) => todo!(),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -577,8 +726,11 @@ mod test {
         db::{
             self,
             component::{
-                graph::{InterPartitionGraph, IntraPartitionGraph}, ids::{PartitionId, VectorId}, partition::{Partition, VectorEntry}
-            }, operations::add::add_into,
+                graph::{InterPartitionGraph, IntraPartitionGraph},
+                ids::{PartitionId, VectorId},
+                partition::{Partition, VectorEntry},
+            },
+            operations::add::add_into,
         },
         vector::{self, Vector, VectorSpace},
     };

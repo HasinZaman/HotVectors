@@ -12,7 +12,7 @@ pub struct Meta<A: Field<A>, B: VectorSpace<A> + Clone> {
     pub size: usize,
     pub centroid: B,
 
-    _phantom_data: PhantomData<A>,
+    pub _phantom_data: PhantomData<A>,
 }
 
 impl<A: Field<A>, B: VectorSpace<A> + Clone> Meta<A, B> {

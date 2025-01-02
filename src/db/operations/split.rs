@@ -13,12 +13,18 @@ use rancor::{fail, Source};
 use uuid::Uuid;
 
 use crate::{
-    db::{component::{graph::{InterPartitionGraph, IntraPartitionGraph}, ids::{PartitionId, VectorId}, partition::{Partition, PartitionErr}}, operations::{self}},
+    db::{
+        component::{
+            graph::{InterPartitionGraph, IntraPartitionGraph},
+            ids::{PartitionId, VectorId},
+            partition::{Partition, PartitionErr},
+        },
+        operations::{self},
+    },
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
 use super::LoadedPartitions;
-
 
 struct PartitionSubSet<
     'a,
@@ -67,10 +73,7 @@ impl<
             centroid: B::additive_identity(),
         }
     }
-    pub fn add(&mut self, ref_index: usize) -> Result<(), PartitionErr>
-    where
-        B: Debug,
-    {
+    pub fn add(&mut self, ref_index: usize) -> Result<(), PartitionErr> {
         if self.source.size <= ref_index {
             return Err(PartitionErr::VectorNotFound);
         };
@@ -190,9 +193,9 @@ impl<A, B: PartialOrd + PartialEq> PartialEq for KeyValuePair<A, B> {
 }
 
 // testable
-fn split_partition<
-    A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
-    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes + Debug,
+pub fn split_partition<
+    A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
+    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
 >(
@@ -502,9 +505,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::{
-        db::component::partition::VectorEntry, vector::Vector
-    };
+    use crate::{db::component::partition::VectorEntry, vector::Vector};
 
     #[test]
     fn basic_split() {
