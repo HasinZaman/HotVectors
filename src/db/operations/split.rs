@@ -9,17 +9,13 @@ use std::{
 
 use heapify::{make_heap, pop_heap};
 use petgraph::visit::EdgeRef;
-use rancor::{fail, Source};
 use uuid::Uuid;
 
 use crate::{
-    db::{
-        component::{
-            graph::{InterPartitionGraph, IntraPartitionGraph},
-            ids::{PartitionId, VectorId},
-            partition::{Partition, PartitionErr},
-        },
-        operations::{self},
+    db::component::{
+        graph::{InterPartitionGraph, IntraPartitionGraph},
+        ids::{PartitionId, VectorId},
+        partition::{Partition, PartitionErr},
     },
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
@@ -501,11 +497,13 @@ pub async fn split<
 
 #[cfg(test)]
 mod tests {
-    use operations::add::add_into;
     use uuid::Uuid;
 
     use super::*;
-    use crate::{db::component::partition::VectorEntry, vector::Vector};
+    use crate::{
+        db::{component::partition::VectorEntry, operations::add::add_into},
+        vector::Vector,
+    };
 
     #[test]
     fn basic_split() {

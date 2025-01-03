@@ -1,5 +1,11 @@
 use std::{
-    array, collections::HashMap, error::Error, fmt::Display, marker::PhantomData, mem::{self, swap}, sync::Arc
+    array,
+    collections::HashMap,
+    error::Error,
+    fmt::Display,
+    marker::PhantomData,
+    mem::{self, swap},
+    sync::Arc,
 };
 
 use heapify::{make_heap_with, pop_heap_with};
@@ -10,20 +16,17 @@ use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
     de::Pool,
-    from_bytes, rancor,
-    rend::u32_le,
-    to_bytes,
-    tuple::ArchivedTuple3,
+    from_bytes, rancor, to_bytes,
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
-    Archive, Deserialize, DeserializeUnsized,
+    Archive, Deserialize,
 };
 
-use super::{serial::FileExtension};
+use super::serial::FileExtension;
 
 #[derive(PartialEq, Eq, Debug)]
-pub enum BufferError{
+pub enum BufferError {
     OutOfSpace,
-    DataNotFound
+    DataNotFound,
 }
 
 impl From<rancor::Error> for BufferError {
@@ -38,7 +41,7 @@ impl From<std::io::Error> for BufferError {
     }
 }
 
-impl Display for BufferError{
+impl Display for BufferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
@@ -312,9 +315,7 @@ where
 
         let index = match index_map.get(id) {
             Some(index) => *index,
-            None => {
-                return Err(BufferError::DataNotFound)
-            },
+            None => return Err(BufferError::DataNotFound),
         };
         let used_stack = &mut *self.used_stack[index].write().await;
 
@@ -345,9 +346,7 @@ where
 
         let index = match index_map.get(id) {
             Some(index) => *index,
-            None => {
-                return Err(BufferError::DataNotFound)
-            },
+            None => return Err(BufferError::DataNotFound),
         };
         let used_stack = &mut *self.used_stack[index].write().await;
 

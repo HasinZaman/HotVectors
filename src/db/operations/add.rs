@@ -4,14 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use petgraph::{
-    adj::NodeIndex,
-    algo::min_spanning_tree,
-    csr::DefaultIx,
-    data::DataMap,
-    graph::EdgeIndex,
-    visit::{Data, EdgeRef, IntoEdgeReferences},
-};
+use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
 
 use tokio::sync::RwLock;
 use uuid::Uuid;

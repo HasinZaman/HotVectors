@@ -1,4 +1,4 @@
-use std::{array, marker::PhantomData, mem, ops::Index, str::FromStr};
+use std::{array, marker::PhantomData, ops::Index, str::FromStr};
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -330,7 +330,6 @@ impl<A: Field<A>, B: VectorSpace<A> + Sized> VectorEntry<A, B> {
         }
     }
 }
-
 
 #[derive(Archive, Debug, Serialize, Deserialize)]
 pub struct PartitionSerial<A: Clone + Copy> {

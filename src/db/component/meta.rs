@@ -1,6 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
-
-use tokio::sync::RwLock;
+use std::marker::PhantomData;
 
 use crate::vector::{Field, VectorSpace};
 

@@ -2,15 +2,19 @@ use std::{collections::HashSet, fmt::Debug};
 
 use petgraph::{
     graph::EdgeIndex,
-    visit::{EdgeRef, IntoEdgeReferences, NodeRef},
+    visit::{EdgeRef, IntoEdgeReferences},
 };
-use tokio::try_join;
 
-use crate::{db::component::{graph::IntraPartitionGraph, ids::{PartitionId, VectorId}, partition::{Partition, PartitionErr, VectorEntry}}, vector::{Field, VectorSerial, VectorSpace}};
-
-use super::{
-    InterPartitionGraph, LoadedPartitions,
+use crate::{
+    db::component::{
+        graph::IntraPartitionGraph,
+        ids::{PartitionId, VectorId},
+        partition::{Partition, PartitionErr, VectorEntry},
+    },
+    vector::{Field, VectorSerial, VectorSpace},
 };
+
+use super::{InterPartitionGraph, LoadedPartitions};
 
 // TESTABLE
 pub(self) fn merge_into<
@@ -202,11 +206,14 @@ mod test {
     use uuid::Uuid;
 
     use crate::{
-        db::{component::{graph::IntraPartitionGraph, ids::{PartitionId, VectorId}, partition::{Partition, VectorEntry}}, operations::{
-            add::add_into,
-            merge::merge_into,
-            InterPartitionGraph,
-        }},
+        db::{
+            component::{
+                graph::IntraPartitionGraph,
+                ids::{PartitionId, VectorId},
+                partition::{Partition, VectorEntry},
+            },
+            operations::{add::add_into, merge::merge_into, InterPartitionGraph},
+        },
         vector::{Field, Vector, VectorSerial, VectorSpace},
     };
 
