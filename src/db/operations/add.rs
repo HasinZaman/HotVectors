@@ -338,7 +338,21 @@ where
 }
 
 pub async fn add<
-    A: PartialEq + Clone + Copy + Field<A>,
+    A: PartialEq
+        + PartialOrd
+        + Clone
+        + Copy
+        + Field<A>
+        + for<'a> rkyv::Serialize<
+            rancor::Strategy<
+                rkyv::ser::Serializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'a>,
+                    rkyv::ser::sharing::Share,
+                >,
+                rancor::Error,
+            >,
+        >,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
@@ -360,18 +374,7 @@ pub async fn add<
     meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
 ) -> Result<(), PartitionErr>
 where
-    A: PartialOrd + Ord,
     VectorSerial<A>: From<B>,
-    A: for<'a> rkyv::Serialize<
-        rancor::Strategy<
-            rkyv::ser::Serializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::ser::sharing::Share,
-            >,
-            rancor::Error,
-        >,
-    >,
     for<'a> <A as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
     [ArchivedVectorEntrySerial<A>]:
@@ -662,12 +665,11 @@ where
             // add to meta_data
             meta_data.insert(
                 new_partition.id,
-                Arc::new(RwLock::new(Meta {
-                    id: PartitionId(new_partition.id),
-                    size: new_partition.size,
-                    centroid: new_partition.centroid(),
-                    _phantom_data: std::marker::PhantomData,
-                })),
+                Arc::new(RwLock::new(Meta::new(
+                    PartitionId(new_partition.id),
+                    new_partition.size,
+                    new_partition.centroid(),
+                ))),
             );
             {
                 // get meta data

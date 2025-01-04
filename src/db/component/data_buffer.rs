@@ -9,7 +9,11 @@ use std::{
 };
 
 use heapify::{make_heap_with, pop_heap_with};
-use tokio::sync::RwLock;
+use tokio::{
+    runtime::Runtime,
+    sync::RwLock,
+    task::{JoinHandle, JoinSet},
+};
 use uuid::Uuid;
 
 use rancor::Strategy;
@@ -147,6 +151,49 @@ where
             index_map: RwLock::new(HashMap::new()),
             _phantom_data: PhantomData,
         }
+    }
+
+    pub async fn save(&self) {
+        let iter = self.index_map.read().await.iter();
+
+        for (id, index) in &*self.index_map.read().await {
+            let index = *index;
+
+            let Some(data) = &*self.buffer[index].read().await else {
+                todo!()
+            };
+
+            let serial_value: B = data.clone().into();
+
+            let bytes = to_bytes::<rancor::Error>(&serial_value).unwrap();
+
+            tokio::fs::write(
+                &format!("{}//{}.{}", self.source, id.to_string(), B::extension()),
+                bytes.as_slice(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    pub async fn save_pooling(&self, runtime: &Runtime) {
+        // let save_threads: Vec<JoinHandle<()>> = self.index_map
+        //     .read()
+        //     .await
+        //     .iter()
+        //     .map(|(_, index)| {
+        //         let index = *index;
+
+        //         let data = self.buffer[index].clone();
+        //         runtime.spawn(async move{
+
+        //             self.buffer[index]
+        //                 .read();
+        //         })
+        //     })
+        //     .collect();
+
+        todo!()
     }
 
     // access data from buffer

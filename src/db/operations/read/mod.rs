@@ -1,9 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{mpsc::Sender, Arc},
+    sync::Arc,
 };
 
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc::Sender, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -34,10 +34,13 @@ pub async fn stream_meta_data<
         for (id, data) in iter {
             let data = &*data.read().await;
 
-            let _ = sender.send(Response::Success(Success::MetaData(
-                data.size,
-                data.centroid.clone().into(),
-            )));
+            let _ = sender
+                .send(Response::Success(Success::MetaData(
+                    id.to_string(),
+                    data.size,
+                    data.centroid.clone().into(),
+                )))
+                .await;
 
             visited.insert(*id);
         }

@@ -14,6 +14,7 @@ use rkyv::{
     from_bytes,
     rend::u32_le,
     string::ArchivedString,
+    to_bytes,
     tuple::{ArchivedTuple2, ArchivedTuple3},
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, Deserialize, DeserializeUnsized, Serialize,
@@ -68,6 +69,55 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
             .unwrap()
             .into()
     }
+
+    pub async fn save(&self, dir: &str, name: &str)
+    where
+        A: Archive
+            + for<'a> rkyv::Serialize<
+                rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rancor::Error,
+                >,
+            >,
+        [ArchivedTuple3<
+            u32_le,
+            u32_le,
+            ArchivedTuple3<
+                <A as Archive>::Archived,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+            >,
+        >]: DeserializeUnsized<
+            [(
+                usize,
+                usize,
+                (
+                    A,
+                    (std::string::String, std::string::String),
+                    (std::string::String, std::string::String),
+                ),
+            )],
+            Strategy<Pool, rancor::Error>,
+        >,
+        for<'a> <A as Archive>::Archived:
+            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    {
+        let serial_data: InterGraphSerial<A> = self.clone().into();
+
+        let bytes = to_bytes::<rancor::Error>(&serial_data).unwrap();
+
+        tokio::fs::write(
+            &format!("{dir}//{name}.{}", InterGraphSerial::<A>::extension()),
+            bytes.as_slice(),
+        )
+        .await
+        .unwrap();
+    }
+
     pub fn add_node(&mut self, node: PartitionId) -> NodeIndex {
         let idx = self.0.add_node(node);
         self.1.insert(node, idx);
@@ -220,6 +270,7 @@ impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A>
     }
 }
 
+pub type InterGraphSerial<A> = GraphSerial<(A, (String, String), (String, String))>;
 impl<A: Field<A> + Clone + Copy> From<InterPartitionGraph<A>>
     for GraphSerial<(A, (String, String), (String, String))>
 {

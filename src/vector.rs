@@ -69,7 +69,7 @@ impl<A: PartialEq + Clone + Copy + Field<A>, const CAP: usize> VectorSpace<A> fo
 }
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
-pub struct VectorSerial<A: Clone + Copy>(Vec<A>);
+pub struct VectorSerial<A: Clone + Copy>(pub Vec<A>);
 
 impl<A: PartialEq + Clone + Copy, const CAP: usize> From<VectorSerial<A>> for Vector<A, CAP> {
     fn from(value: VectorSerial<A>) -> Self {
