@@ -359,7 +359,7 @@ where
 
             rt.spawn(async move {
                 loop {
-                    sleep(Duration::from_secs(60 * 1)).await;
+                    sleep(Duration::from_secs(60)).await; //60 * 1)).await;
                     {
                         println!("Saving inter_spanning_graph 👠😎");
                         inter_spanning_graph

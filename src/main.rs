@@ -1,30 +1,34 @@
-use std::{collections::HashMap, sync::mpsc};
+use std::thread;
 
-use db::{component::graph::InterPartitionGraph, operations::LoadedPartitions};
-use vector::{Extremes, Vector};
+use db::db_loop;
+use interface::rest_api;
+use tokio::{runtime, sync::mpsc::channel};
+use vector::Vector;
 
 mod db;
+pub mod interface;
 pub mod ops;
 pub mod vector;
 
 fn main() {
-    // println!("Hello, world!");
+    const DB_THREADS: usize = 10;
+    const INTERFACE_THREADS: usize = 2;
 
-    // let a = Vector::<f32, 10>::max();
-    // println!("{a:#?}");
-    let loaded_partitions: LoadedPartitions<f32, Vector<f32, 10>, 500, 500, 500> =
-        LoadedPartitions::new();
-    let inter_partition_graph: InterPartitionGraph<f32> = InterPartitionGraph::new();
-    // let partition_meta_data = HashMap::new();
+    let (cmd_sender, cmd_receiver) = channel(64);
 
-    // let (tx, cmd_input) = mpsc::channel();
-    // let (logger, rx) = mpsc::channel();
+    let db_thread = thread::Builder::new()
+        .name("db_thread".to_string())
+        .spawn(move || {
+            db_loop::<f32, Vector<f32, 2>, 5, 2, 10, DB_THREADS>(cmd_receiver);
+        });
 
-    // db_loop(
-    //     loaded_partitions,
-    //     inter_partition_graph,
-    //     partition_meta_data,
-    //     cmd_input,
-    //     logger,
-    // );
+    let rt = runtime::Builder::new_multi_thread()
+        .worker_threads(INTERFACE_THREADS)
+        .enable_io()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        rest_api::input_loop::<f32, Vector<f32, 2>>(cmd_sender).await;
+    });
 }

@@ -15,7 +15,7 @@ use crate::vector::{Field, VectorSerial, VectorSpace};
 
 use super::{ids::PartitionId, serial::FileExtension};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Meta<A: Field<A>, B: VectorSpace<A> + Clone> {
     pub id: PartitionId,
     pub size: usize,

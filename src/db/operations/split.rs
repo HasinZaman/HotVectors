@@ -310,11 +310,17 @@ pub fn split_partition<
         let mut visit_stack: Vec<VectorId> = Vec::new();
 
         visit_stack.push(VectorId(target[new_partitions[0][0]].id));
-        while not_visited_nodes.len() > 0 {
+        let mut not_visited_nodes_size = not_visited_nodes.len();
+        while not_visited_nodes_size > 0 {
+            // println!("not_visited_nodes: {:?}", not_visited_nodes);
+            // println!("visit_stack: {:?}", visit_stack);
+           
             let current_node = match visit_stack.pop() {
                 Some(node) => node,
                 None => {
-                    visit_stack.push(not_visited_nodes.drain().next().unwrap());
+                    let vector_id = not_visited_nodes.iter().next().unwrap().clone();
+                    visit_stack.push(vector_id);
+                    // not_visited_nodes.remove(&vector_id);
                     continue;
                 }
             };
@@ -324,7 +330,10 @@ pub fn split_partition<
                 continue;
             }
 
+
             let current_partition_index = partition_membership[&current_node];
+
+            // println!("current node: Partition_index({current_partition_index}) :- {current_node:?}\n\n");
 
             if !intra_graphs[current_partition_index]
                 .1
@@ -340,7 +349,7 @@ pub fn split_partition<
                     (
                         {
                             let source = intra_graph.0.node_weight(edge.source()).unwrap();
-                            let target = intra_graph.0.node_weight(edge.source()).unwrap();
+                            let target = intra_graph.0.node_weight(edge.target()).unwrap();
                             match source == &current_node {
                                 true => *target,
                                 false => *source,
@@ -377,6 +386,8 @@ pub fn split_partition<
 
                     visit_stack.push(other_node);
                 });
+
+            not_visited_nodes_size = not_visited_nodes.len()
         }
 
         (intra_graphs, new_inter_edges)
@@ -386,14 +397,20 @@ pub fn split_partition<
         let mut tmp: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> =
             new_partitions.iter().map(|x| Partition::from(x)).collect();
 
-        mem::swap(&mut tmp[0].id, &mut target.id);
+        let _ = mem::replace(&mut tmp[0].id, target.id.clone());
+
+        // mem::swap(target, &mut tmp[0]);
 
         tmp
     };
     {
+        
         new_partitions.iter().skip(1).for_each(|partition| {
             inter_graph.add_node(PartitionId(partition.id));
         });
+
+        // println!("{:#?}", inter_graph.1);
+        // println!("{:#?}", new_inter_edges);
 
         new_inter_edges
             .into_iter()
@@ -471,10 +488,23 @@ pub fn split_partition<
     }
 
     // Note: new_partitions[0].id = target.id -> therefore should replace target after split_target call
-    Ok(new_partitions
-        .into_iter()
-        .zip(intra_graphs.into_iter())
-        .collect())
+    let mut result: Vec<_> = new_partitions
+    .into_iter()
+    .zip(intra_graphs.into_iter())
+    .collect();
+
+    let i1= result.len()-1;
+    result.swap(0, i1);
+
+    // let (
+    //     replace_partition,
+    //     mut replace_intra_graph
+    // ) = result.pop().unwrap();
+
+    // let _ = mem::replace(target, replace_partition);
+    // let _ = mem::replace(target, replace_partition);
+    
+    Ok(result)
 }
 
 pub async fn split<
@@ -553,14 +583,14 @@ mod tests {
         let result = split_partition(&mut partition, &mut intra_graph, splits, &mut inter_graph);
         // Validate results
         assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(result.len(), splits);
+        let new_partitions = result.unwrap();
+        assert_eq!(new_partitions.len(), splits);
 
-        result.iter().for_each(|(x, _)| {
+        new_partitions.iter().for_each(|(x, _)| {
             println!("{:?}", x);
         });
 
-        let result = result.iter().all(|(actual_partition, actual_graph)| {
+        let result = new_partitions.iter().all(|(actual_partition, actual_graph)| {
             expected_partitions
                 .iter()
                 .any(|expected_partition| partition_check(&expected_partition, actual_partition))
@@ -569,6 +599,13 @@ mod tests {
                     .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
         });
         assert!(result);
+
+        assert_eq!(inter_graph.1.len(), 2);
+        assert_eq!(inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)]).count(), 1);
+        // inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)])
+        //     .map(|x|x.source())
+        assert_eq!(inter_graph.0.edges(inter_graph.1[&PartitionId(new_partitions[0].0.id)]).count(), 1);
+        // assert_eq!(inter_graph.1.len(), 2);
     }
 
     fn partition_check<

@@ -1,7 +1,5 @@
 use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    cmp::Ordering, collections::{HashMap, HashSet}, fmt::Debug, mem, sync::Arc
 };
 
 use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
@@ -352,8 +350,9 @@ pub async fn add<
                 >,
                 rancor::Error,
             >,
-        >,
-    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<A>>,
+        >
+        + Debug,
+    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<A>> + Debug,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
@@ -582,12 +581,30 @@ where
                 panic!()
             };
 
-            let (mut new_partition, mut new_graph) = new_splits.remove(0);
+            let (new_partition, new_graph) = new_splits.pop().unwrap();
+
+            let _ = mem::replace(target_partition, new_partition);
+            let _ = mem::replace(target_tree, new_graph);
+
+            let (mut new_partition, mut new_graph) = new_splits.pop().unwrap();
 
             // find newest closet_partition
             let new_partition_dist = B::dist(&value.vector, &new_partition.centroid());
             let target_partition_dist = B::dist(&value.vector, &target_partition.centroid());
+
+            println!(
+                "target_partition - {}\nsize -{}",
+                target_partition.id.to_string(),
+                target_partition.size
+            );
+
+            println!(
+                "new_partition - ({})\nsize -{}",
+                new_partition.id.to_string(),
+                new_partition.size,
+            );
             if new_partition_dist < target_partition_dist {
+                println!("Adding to the original");
                 let neighbor_ids: HashSet<Uuid> = inter_graph
                     .0
                     .edges(inter_graph.1[&PartitionId(new_partition.id)])
@@ -626,6 +643,7 @@ where
                 )
                 .unwrap();
             } else {
+                println!("Adding to the new split");
                 let neighbor_ids: HashSet<Uuid> = inter_graph
                     .0
                     .edges(inter_graph.1[&PartitionId(target_partition.id)])
@@ -663,6 +681,7 @@ where
             }
 
             // add to meta_data
+            println!("Inserting into meta data");
             meta_data.insert(
                 new_partition.id,
                 Arc::new(RwLock::new(Meta::new(
@@ -671,6 +690,8 @@ where
                     new_partition.centroid(),
                 ))),
             );
+
+            println!("{:#?}", meta_data);
             {
                 // get meta data
                 let target_meta = &mut *meta_data[&*closet_id].write().await;
@@ -680,6 +701,7 @@ where
             }
 
             // push to partition_buffer
+            println!("Inserting into partition_buffer");
             if let Err(_) = partition_buffer.push(new_partition.clone()).await {
                 let (_index, id) = partition_buffer
                     .least_used_iter()
@@ -693,7 +715,11 @@ where
                 partition_buffer.push(new_partition).await.unwrap();
             }
 
+            println!("{:#?}", partition_buffer.buffer_size.read().await);
+            // println!("{:#?}", partition_buffer.);
+
             // push to min_span_buffer
+            println!("Inserting into min_spanning_tree_buffer");
             if let Err(_) = min_spanning_tree_buffer.push(new_graph.clone()).await {
                 let (_index, id) = min_spanning_tree_buffer
                     .least_used_iter()
@@ -706,6 +732,8 @@ where
 
                 min_spanning_tree_buffer.push(new_graph).await.unwrap();
             }
+
+            println!("{:#?}", min_spanning_tree_buffer.buffer_size.read().await);
         }
         Err(_) => todo!(),
     }

@@ -80,7 +80,10 @@ where
 
 async fn metadata_route<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Sized + Send + Sync>(
     State(state): State<Arc<AppState<A, B>>>,
-) -> Json<String> where f32: From<A> {
+) -> Json<String>
+where
+    f32: From<A>,
+{
     println!("META REQUEST");
 
     let (tx, mut rx) = channel(64);
@@ -88,7 +91,9 @@ async fn metadata_route<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Sized + 
     let _ = state
         .sender
         .send((
-            Cmd::Atomic(AtomicCmd::GetMetaData{ transaction_id: None}),
+            Cmd::Atomic(AtomicCmd::GetMetaData {
+                transaction_id: None,
+            }),
             tx,
         ))
         .await;
@@ -100,13 +105,11 @@ async fn metadata_route<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Sized + 
             panic!("")
         };
 
-        data.push(
-            (
-                id,
-                size,
-                vector_serial.0.into_iter().map(|x| f32::from(x)).collect()
-            )
-        );
+        data.push((
+            id,
+            size,
+            vector_serial.0.into_iter().map(|x| f32::from(x)).collect(),
+        ));
     }
 
     Json(format!("{:?}", data))
@@ -120,7 +123,7 @@ pub async fn input_loop<
 ) -> !
 where
     <B as TryFrom<Vec<f32>>>::Error: Debug,
-    f32: From<A>
+    f32: From<A>,
 {
     let shared_state = Arc::new(AppState {
         sender: Arc::new(sender.clone()),
