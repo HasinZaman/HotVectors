@@ -11,6 +11,9 @@ pub mod ops;
 pub mod vector;
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
     const DB_THREADS: usize = 10;
     const INTERFACE_THREADS: usize = 2;
 

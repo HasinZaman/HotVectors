@@ -495,14 +495,6 @@ pub fn split_partition<
 
     let i1= result.len()-1;
     result.swap(0, i1);
-
-    // let (
-    //     replace_partition,
-    //     mut replace_intra_graph
-    // ) = result.pop().unwrap();
-
-    // let _ = mem::replace(target, replace_partition);
-    // let _ = mem::replace(target, replace_partition);
     
     Ok(result)
 }

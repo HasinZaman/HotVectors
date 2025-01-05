@@ -5,6 +5,7 @@ use std::{
 use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
 
 use tokio::sync::RwLock;
+use tracing::{event, Level};
 use uuid::Uuid;
 
 use rancor::Strategy;
@@ -382,13 +383,23 @@ where
     [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
         DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
 {
+    event!(Level::INFO, "🔥 Adding vector: {value:?}");
+
     let meta_data = &mut *meta_data.write().await;
+    event!(Level::DEBUG, "🔒 Locked `meta_data`");
+
     let mut partition_buffer = partition_buffer.write().await;
+    event!(Level::DEBUG, "🔒 Locked `partition_buffer`");
+
     let min_spanning_tree_buffer = &mut *min_spanning_tree_buffer.write().await;
+    event!(Level::DEBUG, "🔒 Locked `min_spanning_tree_buffer`");
+
     let inter_graph = &mut *inter_graph.write().await;
+    event!(Level::DEBUG, "🔒 Locked `inter_graph`");
 
     // find closet id
     let closet_id = {
+        event!(Level::INFO, "✨ Finding closest partition");
         let mut meta_data = meta_data.iter();
         let mut closest = {
             let (_, data) = meta_data.next().unwrap();
@@ -410,17 +421,29 @@ where
 
         closest.0
     };
+    event!(Level::INFO, "💎 Closest partition: {closet_id:?}");
 
     // getting neighbor ids
     let neighbor_ids: Vec<PartitionId> = inter_graph
         .0
         .edges(inter_graph.1[&closet_id])
         .map(|edge| edge.weight())
-        .map(|edge| [edge.1 .0, edge.2 .0])
-        .flatten()
+        .map(|edge| (edge.1 .0, edge.2 .0))
+        .map(|(
+            partition_id_1,
+            partition_id_2,
+        )| {
+            match partition_id_1 == closet_id {
+                true => partition_id_2,
+                false => partition_id_1,
+            }
+        })
+        // .flatten()
         .collect::<HashSet<PartitionId>>()
         .drain()
+        // .filter()
         .collect();
+    event!(Level::INFO, "🤝 Neighbors: {neighbor_ids:?}");
 
     // load partitions
     let partition_buffer = &mut *partition_buffer;
@@ -432,6 +455,7 @@ where
 
     // Allocate enough space by unloading least used resources
     {
+        event!(Level::DEBUG, "📦 Preparing buffer space");
         let required_ids: HashSet<&PartitionId> = required_ids.iter().map(|x| *x).collect();
 
         let not_loaded: usize = {
@@ -445,6 +469,8 @@ where
         };
 
         if let Some(i1) = not_loaded.checked_sub(MAX_LOADED) {
+            event!(Level::WARN, "🗑️ Unloading {i1} partitions");
+
             // unload i1 elements
             let unload_indexes: Vec<(usize, Uuid)> = partition_buffer
                 .least_used_iter()
@@ -458,20 +484,24 @@ where
             for (_index, id) in unload_indexes {
                 // batch drop
                 let _ = partition_buffer.unload(&id).await;
+                event!(Level::DEBUG, "🧹 Unloaded partition {id:?}");
             }
         }
     }
 
     let size = required_ids.len();
+    event!(Level::DEBUG, "required ids: {:?}", required_ids);
     let mut partitions = Vec::with_capacity(size);
     for id in required_ids {
         partitions.push(partition_buffer.access(&*id).await.unwrap());
     }
+    event!(Level::INFO, "🗂️ Loaded {} partitions", partitions.len());
 
     let target_partition = partitions.remove(0);
     let Some(target_partition) = &mut *target_partition.write().await else {
         todo!();
     };
+    event!(Level::DEBUG, "🎯 Target partition ready: {:?}", target_partition.id);
 
     let mut neighbor_partitions = Vec::with_capacity(size - 1);
 
@@ -479,7 +509,7 @@ where
         neighbor_partitions.push(partition.read().await);
     }
     let neighbor_partitions = neighbor_partitions;
-    // drop(partition_buffer);
+    event!(Level::DEBUG, "📋 Neighbors ready: {}", neighbor_partitions.len());
     drop(size);
 
     // load min_spanning trees
@@ -569,6 +599,7 @@ where
 
     match result {
         Ok(_) => {
+            event!(Level::INFO, "✅ Vector added to {:?}", target_partition.id);
             // get meta data
             let target_meta = &mut *meta_data[&*closet_id].write().await;
 
@@ -576,6 +607,7 @@ where
             target_meta.size += 1;
         }
         Err(PartitionErr::Overflow) => {
+            event!(Level::TRACE, "Handling partition overflow error");
             let Ok(mut new_splits) = split_partition(target_partition, target_tree, 2, inter_graph)
             else {
                 panic!()
@@ -592,19 +624,17 @@ where
             let new_partition_dist = B::dist(&value.vector, &new_partition.centroid());
             let target_partition_dist = B::dist(&value.vector, &target_partition.centroid());
 
-            println!(
-                "target_partition - {}\nsize -{}",
-                target_partition.id.to_string(),
-                target_partition.size
+            event!(
+                Level::DEBUG,
+                target_partition_id = %target_partition.id,
+                target_partition_size = target_partition.size,
+                new_partition_id = %new_partition.id,
+                new_partition_size = new_partition.size,
+                "Calculated distances for new and target partitions"
             );
 
-            println!(
-                "new_partition - ({})\nsize -{}",
-                new_partition.id.to_string(),
-                new_partition.size,
-            );
             if new_partition_dist < target_partition_dist {
-                println!("Adding to the original");
+                event!(Level::INFO,"Adding value to the original partition");
                 let neighbor_ids: HashSet<Uuid> = inter_graph
                     .0
                     .edges(inter_graph.1[&PartitionId(new_partition.id)])
@@ -641,9 +671,9 @@ where
                             &mut IntraPartitionGraph<A>,
                         )>>(),
                 )
-                .unwrap();
+                .expect("Failed to add value into the partition");
             } else {
-                println!("Adding to the new split");
+                event!(Level::INFO, "Adding value to the new split");
                 let neighbor_ids: HashSet<Uuid> = inter_graph
                     .0
                     .edges(inter_graph.1[&PartitionId(target_partition.id)])
@@ -677,11 +707,13 @@ where
                             &mut IntraPartitionGraph<A>,
                         )>>(),
                 )
-                .unwrap();
+                .expect("Failed to add value into the new partition");
             }
+            drop(inter_graph);
+            // inter_graph.
 
             // add to meta_data
-            println!("Inserting into meta data");
+            event!(Level::INFO, "Updating metadata");
             meta_data.insert(
                 new_partition.id,
                 Arc::new(RwLock::new(Meta::new(
@@ -690,8 +722,14 @@ where
                     new_partition.centroid(),
                 ))),
             );
+            {
+                let meta_data = &mut *meta_data[&target_partition.id].write().await;
 
-            println!("{:#?}", meta_data);
+                meta_data.size = target_partition.size;
+                meta_data.centroid = target_partition.centroid()
+            }
+
+            event!(Level::DEBUG, ?meta_data, "Updated meta_data");
             {
                 // get meta data
                 let target_meta = &mut *meta_data[&*closet_id].write().await;
@@ -701,8 +739,9 @@ where
             }
 
             // push to partition_buffer
-            println!("Inserting into partition_buffer");
+            event!(Level::INFO, "Inserting new partition into partition_buffer");
             if let Err(_) = partition_buffer.push(new_partition.clone()).await {
+                event!(Level::WARN, "Partition buffer full, unloading least-used partition");
                 let (_index, id) = partition_buffer
                     .least_used_iter()
                     .await
@@ -715,12 +754,10 @@ where
                 partition_buffer.push(new_partition).await.unwrap();
             }
 
-            println!("{:#?}", partition_buffer.buffer_size.read().await);
-            // println!("{:#?}", partition_buffer.);
-
             // push to min_span_buffer
-            println!("Inserting into min_spanning_tree_buffer");
+            event!(Level::INFO, "Inserting new graph into min_spanning_tree_buffer");
             if let Err(_) = min_spanning_tree_buffer.push(new_graph.clone()).await {
+                event!(Level::WARN, "Min spanning tree buffer full, unloading least-used graph");
                 let (_index, id) = min_spanning_tree_buffer
                     .least_used_iter()
                     .await
@@ -733,7 +770,7 @@ where
                 min_spanning_tree_buffer.push(new_graph).await.unwrap();
             }
 
-            println!("{:#?}", min_spanning_tree_buffer.buffer_size.read().await);
+            // println!("{:#?}", min_spanning_tree_buffer.buffer_size.read().await);
         }
         Err(_) => todo!(),
     }
