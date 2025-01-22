@@ -314,7 +314,7 @@ pub fn split_partition<
         while not_visited_nodes_size > 0 {
             // println!("not_visited_nodes: {:?}", not_visited_nodes);
             // println!("visit_stack: {:?}", visit_stack);
-           
+
             let current_node = match visit_stack.pop() {
                 Some(node) => node,
                 None => {
@@ -329,7 +329,6 @@ pub fn split_partition<
                 // already visited current node
                 continue;
             }
-
 
             let current_partition_index = partition_membership[&current_node];
 
@@ -404,7 +403,6 @@ pub fn split_partition<
         tmp
     };
     {
-        
         new_partitions.iter().skip(1).for_each(|partition| {
             inter_graph.add_node(PartitionId(partition.id));
         });
@@ -489,13 +487,13 @@ pub fn split_partition<
 
     // Note: new_partitions[0].id = target.id -> therefore should replace target after split_target call
     let mut result: Vec<_> = new_partitions
-    .into_iter()
-    .zip(intra_graphs.into_iter())
-    .collect();
+        .into_iter()
+        .zip(intra_graphs.into_iter())
+        .collect();
 
-    let i1= result.len()-1;
+    let i1 = result.len() - 1;
     result.swap(0, i1);
-    
+
     Ok(result)
 }
 
@@ -582,21 +580,34 @@ mod tests {
             println!("{:?}", x);
         });
 
-        let result = new_partitions.iter().all(|(actual_partition, actual_graph)| {
-            expected_partitions
-                .iter()
-                .any(|expected_partition| partition_check(&expected_partition, actual_partition))
-                && expected_centroids
+        let result = new_partitions
+            .iter()
+            .all(|(actual_partition, actual_graph)| {
+                expected_partitions.iter().any(|expected_partition| {
+                    partition_check(&expected_partition, actual_partition)
+                }) && expected_centroids
                     .iter()
                     .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
-        });
+            });
         assert!(result);
 
         assert_eq!(inter_graph.1.len(), 2);
-        assert_eq!(inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)]).count(), 1);
+        assert_eq!(
+            inter_graph
+                .0
+                .edges(inter_graph.1[&PartitionId(partition.id)])
+                .count(),
+            1
+        );
         // inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)])
         //     .map(|x|x.source())
-        assert_eq!(inter_graph.0.edges(inter_graph.1[&PartitionId(new_partitions[0].0.id)]).count(), 1);
+        assert_eq!(
+            inter_graph
+                .0
+                .edges(inter_graph.1[&PartitionId(new_partitions[0].0.id)])
+                .count(),
+            1
+        );
         // assert_eq!(inter_graph.1.len(), 2);
     }
 

@@ -14,6 +14,7 @@ use tokio::{
     sync::RwLock,
     task::{JoinHandle, JoinSet},
 };
+use tracing::{event, Level};
 use uuid::Uuid;
 
 use rancor::Strategy;
@@ -31,6 +32,10 @@ use super::serial::FileExtension;
 pub enum BufferError {
     OutOfSpace,
     DataNotFound,
+
+    FileNotFound,
+
+    FailedLockAccess,
 }
 
 impl From<rancor::Error> for BufferError {
@@ -41,7 +46,42 @@ impl From<rancor::Error> for BufferError {
 
 impl From<std::io::Error> for BufferError {
     fn from(value: std::io::Error) -> Self {
-        todo!()
+        println!("err: {value}");
+
+        match value.kind() {
+            std::io::ErrorKind::NotFound => Self::FileNotFound,
+            std::io::ErrorKind::PermissionDenied => todo!(),
+            std::io::ErrorKind::ConnectionRefused => todo!(),
+            std::io::ErrorKind::ConnectionReset => todo!(),
+            std::io::ErrorKind::ConnectionAborted => todo!(),
+            std::io::ErrorKind::NotConnected => todo!(),
+            std::io::ErrorKind::AddrInUse => todo!(),
+            std::io::ErrorKind::AddrNotAvailable => todo!(),
+            std::io::ErrorKind::BrokenPipe => todo!(),
+            std::io::ErrorKind::AlreadyExists => todo!(),
+            std::io::ErrorKind::WouldBlock => todo!(),
+            std::io::ErrorKind::InvalidInput => todo!(),
+            std::io::ErrorKind::InvalidData => todo!(),
+            std::io::ErrorKind::TimedOut => todo!(),
+            std::io::ErrorKind::WriteZero => todo!(),
+            std::io::ErrorKind::Interrupted => todo!(),
+            std::io::ErrorKind::Unsupported => todo!(),
+            std::io::ErrorKind::UnexpectedEof => todo!(),
+            std::io::ErrorKind::OutOfMemory => todo!(),
+            std::io::ErrorKind::Other => todo!(),
+
+            _ => todo!(),
+        }
+        // value.downcast()
+
+        // Have to look every implementation of this from
+        
+    }
+}
+
+impl From<tokio::sync::TryLockError> for BufferError {
+    fn from(value: tokio::sync::TryLockError) -> Self {
+        Self::FailedLockAccess
     }
 }
 
@@ -163,12 +203,19 @@ where
                 todo!()
             };
 
+            
+            let path = &format!("{}//{}.{}", self.source, id.to_string(), B::extension());
+            event!(
+                Level::INFO,
+                "saving:{path}"
+            );
+
             let serial_value: B = data.clone().into();
 
             let bytes = to_bytes::<rancor::Error>(&serial_value).unwrap();
 
             tokio::fs::write(
-                &format!("{}//{}.{}", self.source, id.to_string(), B::extension()),
+                path,
                 bytes.as_slice(),
             )
             .await
@@ -197,8 +244,21 @@ where
     }
 
     // access data from buffer
-    pub fn try_access(&mut self, id: &Uuid) -> Result<RwLock<A>, BufferError> {
-        todo!()
+    pub fn try_access(&mut self, id: &Uuid) -> Result<Arc<RwLock<Option<A>>>, BufferError> {
+        let index_map = &*self.index_map.try_read()?;
+
+        let index = match index_map.get(id) {
+            Some(index) => *index,
+            None => return Err(BufferError::DataNotFound),
+        };
+
+        let Some((_prev, cur)) = &mut *self.used_stack[index].try_write()? else {
+            todo!()
+        };
+
+        let _ = mem::replace(cur, *cur + 1);
+
+        Ok(self.buffer[index].clone())
     }
 
     pub async fn max_try_access<const MAX: usize>(
@@ -311,6 +371,12 @@ where
     }
 
     pub async fn load(&mut self, id: &Uuid) -> Result<(), BufferError> {
+        let index_map = &mut *self.index_map.write().await;
+
+        if index_map.contains_key(id) {
+            return Ok(());
+        }
+
         let buffer_size = &mut *self.buffer_size.write().await;
 
         if *buffer_size + 1 >= CAP {
@@ -325,16 +391,21 @@ where
         let buffer = &mut *self.buffer[index].write().await;
         let used_stack = &mut *self.used_stack[index].write().await;
 
-        let index_map = &mut *self.index_map.write().await;
-
         //load file
         let value: A = {
-            let bytes = tokio::fs::read(&format!(
+            let file_path = &format!(
                 "{}//{}.{}",
                 self.source,
                 id.to_string(),
                 B::extension()
-            ))
+            );
+
+            event!(
+                Level::DEBUG,
+                "Load {file_path}"
+            );
+
+            let bytes = tokio::fs::read(&file_path)
             .await?;
 
             from_bytes::<B, rancor::Error>(&bytes)?.into()
@@ -388,6 +459,7 @@ where
     }
 
     pub async fn unload(&mut self, id: &Uuid) -> Result<(), BufferError> {
+        event!(Level::INFO, "unload :- id {}", id);
         // get access to all locks
         let mut index_map = self.index_map.write().await;
 
@@ -395,6 +467,8 @@ where
             Some(index) => *index,
             None => return Err(BufferError::DataNotFound),
         };
+
+        event!(Level::INFO, "unload :- index {}", index);
         let used_stack = &mut *self.used_stack[index].write().await;
 
         let buffer_size = &mut *self.buffer_size.write().await;
@@ -404,6 +478,7 @@ where
         let empty_index_size = &mut *self.empty_index_size.write().await;
 
         // drop data
+        event!(Level::DEBUG, "Replacing value @ index with None");
         let _ = mem::replace(used_stack, None);
         let Some(value) = mem::replace(buffer, None) else {
             todo!()
@@ -413,17 +488,153 @@ where
         // add to free spot index (should be a min heap to ensure continuous blocks in the buffer)
         empty_index_stack[*empty_index_size] = Some(index);
         let _ = mem::replace(empty_index_size, *empty_index_size + 1);
+        event!(Level::DEBUG, "Empty index stack :- {:?}", empty_index_stack);
 
         // removed id from index map
         index_map.remove(id);
 
         // Export value
+        let path = &format!(
+            "{}//{}.{}",
+            self.source,
+            id.to_string(),
+            B::extension()
+        );
+        event!(
+            Level::INFO,
+            "saving: {path}"
+        );
+
         let serial_value: B = value.into();
 
         let bytes = to_bytes::<rancor::Error>(&serial_value)?;
 
         tokio::fs::write(
-            &format!("{}//{}.{}", self.source, id.to_string(), B::extension()),
+            path,
+            bytes.as_slice(),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn unload_and_load(
+        &mut self,
+        unload_id: &Uuid,
+        load_id: &Uuid,
+    ) -> Result<(), BufferError> {
+        let mut index_map = self.index_map.write().await;
+
+        let index = match index_map.get(unload_id) {
+            Some(index) => *index,
+            None => return Err(BufferError::DataNotFound),
+        };
+        let used_stack = &mut *self.used_stack[index].write().await;
+
+        let buffer = &mut *self.buffer[index].write().await;
+
+        //load file
+        let load_value: A = {
+            
+            let file_path = &format!(
+                "{}//{}.{}",
+                self.source,
+                load_id.to_string(),
+                B::extension()
+            );
+
+            event!(
+                Level::DEBUG,
+                "Load {file_path}"
+            );
+
+            let bytes = tokio::fs::read(file_path)
+            .await?;
+
+            from_bytes::<B, rancor::Error>(&bytes)?.into()
+        };
+
+        // drop data
+        let _ = mem::replace(used_stack, Some((0, 1)));
+
+        index_map.insert((&load_value).into(), index);
+
+        let Some(unload_value) = mem::replace(buffer, Some(load_value)) else {
+            todo!()
+        };
+
+        // removed id from index map
+        index_map.remove(unload_id);
+
+        // Export value
+        {
+            let path = &format!(
+                "{}//{}.{}",
+                self.source,
+                unload_id.to_string(),
+                B::extension()
+            );
+            event!(
+                Level::INFO,
+                "saving: {path}"
+            );
+            let serial_value: B = unload_value.into();
+
+            let bytes = to_bytes::<rancor::Error>(&serial_value)?;
+
+            tokio::fs::write(
+                path,
+                bytes.as_slice(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    pub async fn unload_and_push(
+        &mut self,
+        unload_id: &Uuid,
+        push_value: A,
+    ) -> Result<(), BufferError> {
+        let mut index_map = self.index_map.write().await;
+
+        let index = match index_map.get(unload_id) {
+            Some(index) => *index,
+            None => return Err(BufferError::DataNotFound),
+        };
+        let used_stack = &mut *self.used_stack[index].write().await;
+
+        let buffer = &mut *self.buffer[index].write().await;
+
+        // drop data
+        let _ = mem::replace(used_stack, Some((0, 1)));
+
+        index_map.insert((&push_value).into(), index);
+
+        let Some(unload_value) = mem::replace(buffer, Some(push_value)) else {
+            todo!()
+        };
+
+        // removed id from index map
+        index_map.remove(unload_id);
+
+        // Export value
+        let path = &format!(
+            "{}//{}.{}",
+            self.source,
+            unload_id.to_string(),
+            B::extension()
+        );
+        event!(
+            Level::INFO,
+            "saving: {path}"
+        );
+
+        let serial_value: B = unload_value.into();
+
+        let bytes = to_bytes::<rancor::Error>(&serial_value)?;
+
+        tokio::fs::write(
+            path,
             bytes.as_slice(),
         )
         .await?;

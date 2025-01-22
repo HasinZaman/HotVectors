@@ -201,7 +201,7 @@ where
     VectorSerial<A>: From<B>,
     <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
 {
-    event!(Level::INFO,"🔥 HOT VECTOR START UP 👠👠");
+    event!(Level::INFO, "🔥 HOT VECTOR START UP 👠👠");
 
     // initialize internal data
     const PARTITION_DIR: &str = "data//partitions";
@@ -225,7 +225,7 @@ where
     let meta_data = Arc::new(RwLock::new(HashMap::new()));
 
     // check if file environment
-    event!(Level::INFO,"FILE CHECK🗄️🗄️");
+    event!(Level::INFO, "FILE CHECK🗄️🗄️");
     let all_initialized: &[bool] = &[
         dir_initialized_with_files(PARTITION_DIR),
         dir_initialized_with_files(MIN_SPAN_DIR),
@@ -237,7 +237,11 @@ where
         ),
     ];
 
-    event!(Level::INFO,"File system initialized: {:?}", all_initialized);
+    event!(
+        Level::INFO,
+        "File system initialized: {:?}",
+        all_initialized
+    );
 
     // initialize locks
     let rt = runtime::Builder::new_multi_thread()
@@ -252,7 +256,7 @@ where
         let all_false = all_initialized.iter().all(|x| !*x);
         match (all_false, all_true) {
             (true, _) => {
-                event!(Level::INFO,"🔨📈 CREATING FILING CABINET 🔨📈");
+                event!(Level::INFO, "🔨📈 CREATING FILING CABINET 🔨📈");
                 {
                     let partition = Partition::new();
 
@@ -282,8 +286,8 @@ where
 
                     inter_spanning_graph.write().await.add_node(PartitionId(id));
                 }
-                event!(Level::INFO,"JUST MADE A FILING CABINET🔨📈");
-                event!(Level::INFO,"💋📄 FILLING FILING CABINET 💋📄");
+                event!(Level::INFO, "JUST MADE A FILING CABINET🔨📈");
+                event!(Level::INFO, "💋📄 FILLING FILING CABINET 💋📄");
                 {
                     partition_buffer.read().await.save().await;
                     min_spanning_tree_buffer.read().await.save().await;
@@ -302,7 +306,7 @@ where
                 }
             }
             (_, true) => {
-                event!(Level::INFO,"CHECKING FILES💋📓");
+                event!(Level::INFO, "CHECKING FILES💋📓");
 
                 // Load inter_graph
                 {
@@ -334,57 +338,56 @@ where
             (false, false) => panic!("Messed up file environment"),
         }
 
-        {
-            let partition_buffer = partition_buffer.clone();
-            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+        // {
+        //     let partition_buffer = partition_buffer.clone();
+        //     let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
 
-            rt.spawn(async move {
-                loop {
-                    sleep(Duration::from_secs(10)).await;
+        //     rt.spawn(async move {
+        //         loop {
+        //             sleep(Duration::from_secs(10)).await;
 
-                    {
-                        event!(Level::INFO,"DECREMENTING partition_buffer 👠😎");
-                        partition_buffer.write().await.de_increment();
-                    }
-                    {
-                        event!(Level::INFO,"DECREMENTING min_spanning_tree_buffer 👠😎");
-                        min_spanning_tree_buffer.write().await.de_increment();
-                    }
-                }
-            });
-        }
+        //             {
+        //                 event!(Level::INFO, "DECREMENTING partition_buffer 👠😎");
+        //                 partition_buffer.write().await.de_increment();
+        //             }
+        //             {
+        //                 event!(Level::INFO, "DECREMENTING min_spanning_tree_buffer 👠😎");
+        //                 min_spanning_tree_buffer.write().await.de_increment();
+        //             }
+        //         }
+        //     });
+        // }
 
-        {
-            let meta_data = meta_data.clone();
-            let inter_spanning_graph = inter_spanning_graph.clone();
+        // {
+        //     let meta_data = meta_data.clone();
+        //     let inter_spanning_graph = inter_spanning_graph.clone();
 
-            rt.spawn(async move {
-                loop {
-                    sleep(Duration::from_secs(20)).await; //60 * 1)).await;
-                    {
-                        event!(Level::INFO,"Saving inter_spanning_graph 👠😎");
-                        let inter_spanning_graph = {
-                            let rwlock = &*inter_spanning_graph
-                            .read()
-                            .await;
-                        
-                            rwlock.clone()
-                        };
-                        inter_spanning_graph.save(PERSISTENT_DIR, GLOBAL_MIN_SPAN_FILE)
-                            .await;
-                    }
-                    {
-                        event!(Level::INFO,"Saving meta_data 👠😎");
-                        for (id, data) in meta_data.read().await.iter() {
-                            let data = &*data.read().await;
+        //     rt.spawn(async move {
+        //         loop {
+        //             sleep(Duration::from_secs(20)).await; //60 * 1)).await;
+        //             {
+        //                 event!(Level::INFO, "Saving inter_spanning_graph 👠😎");
+        //                 let inter_spanning_graph = {
+        //                     let rwlock = &*inter_spanning_graph.read().await;
 
-                            data.save(META_DATA_DIR, &id.to_string()).await;
-                        }
-                    }
-                }
-            });
-        }
-        event!(Level::INFO,"I'M ALL HOT TO GO👠👠");
+        //                     rwlock.clone()
+        //                 };
+        //                 inter_spanning_graph
+        //                     .save(PERSISTENT_DIR, GLOBAL_MIN_SPAN_FILE)
+        //                     .await;
+        //             }
+        //             {
+        //                 event!(Level::INFO, "Saving meta_data 👠😎");
+        //                 for (id, data) in meta_data.read().await.iter() {
+        //                     let data = &*data.read().await;
+
+        //                     data.save(META_DATA_DIR, &id.to_string()).await;
+        //                 }
+        //             }
+        //         }
+        //     });
+        // }
+        event!(Level::INFO, "I'M ALL HOT TO GO👠👠");
         loop {
             let (cmd, tx) = cmd_input.recv().await.unwrap();
 
@@ -409,7 +412,11 @@ where
                             transaction_id,
                         } => {
                             let id = Uuid::new_v4();
-                            event!(Level::INFO,"Insert Vector :- ({}) {vector:?}", id.to_string());
+                            event!(
+                                Level::INFO,
+                                "Insert Vector :- ({}) {vector:?}",
+                                id.to_string()
+                            );
 
                             let inter_spanning_graph = inter_spanning_graph.clone();
 
