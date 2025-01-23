@@ -268,13 +268,18 @@ fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOr
         (PartitionId, VectorId),
     )>,
     PartitionErr,
-> {
+> where IntraPartitionGraph<A>: Debug {
     let node_index = min_spanning_graph.add_node(vector_id);
 
     // check if new inter_graph to replace intra_edges
     let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
         .0
-        .edges(min_spanning_graph.1[&target_vector_id])
+        .edges(match min_spanning_graph.1.get(&target_vector_id) {
+            Some(val) => *val,
+            None => {
+                panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
+            }
+        })
         .map(|edge| {
             (
                 edge.id(),
@@ -358,7 +363,7 @@ fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + Partial
         (PartitionId, VectorId),
     )>,
     PartitionErr,
-> {
+> where IntraPartitionGraph<A>: Debug {
     let replace_inter_edges: Vec<(
         EdgeIndex,
         A,
@@ -384,7 +389,14 @@ fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + Partial
     // check if new inter_graph to replace intra_edges
     let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
         .0
-        .edges(min_spanning_graph.1[&target_vector_id])
+        .edges(
+            match min_spanning_graph.1.get(&target_vector_id) {
+                Some(val) => *val,
+                None => {
+                    panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
+                }
+            }
+        )
         .map(|edge| {
             (
                 edge.id(),
@@ -808,7 +820,7 @@ where
     event!(Level::DEBUG, "🔒 Locked `inter_graph`");
 
     // find closet id
-    let (closet_partition_id, closet_size) = {
+    let (mut closet_partition_id, closet_size) = {
         event!(Level::INFO, "✨ Finding closest partition");
         let mut meta_data = meta_data.iter();
         let mut closet_size = 0;
@@ -1044,15 +1056,23 @@ where
 
                 event!(Level::DEBUG, "New split size: {}", new_splits.len());
 
+                event!(Level::DEBUG, "OG graph: {min_span_tree:#?}");
+
+
                 {
                     let (new_partition, new_graph) = new_splits.pop().unwrap();
 
                     *partition = new_partition;
                     
                     *min_span_tree = new_graph;
+                    event!(Level::DEBUG, "partition - 1: {partition:?}");
+                    event!(Level::DEBUG, "New graph - 1: {min_span_tree:#?}");
                 }
 
                 let (mut new_partition, new_graph) = new_splits.pop().unwrap();
+                event!(Level::DEBUG, "partition - 2: {new_partition:?}");
+                event!(Level::DEBUG, "New graph - 2: {new_graph:#?}");
+                event!(Level::DEBUG, "inter: {inter_graph:#?}");
                 
 
                 //add into partition or new_partition
@@ -1091,9 +1111,13 @@ where
                     let new_id = (PartitionId(new_partition.id), closet_vector_id.1);
                     event!(
                         Level::DEBUG,
-                        "Changed closet id from = {closet_vector_id:?} -> {new_id:?}"
+                        "closet_vector_id:{closet_vector_id:?}\tcloset_partition_id:{closet_partition_id:?}\tChanged closet id from = {closet_vector_id:?} -> {new_id:?}"
                     );
-                    closet_vector_id = new_id;
+
+                    if closet_vector_id.0 == closet_partition_id {
+                        closet_partition_id = PartitionId(new_partition.id);
+                        closet_vector_id = new_id;
+                    }
                 }
 
                 // if closet_vector_id.0 == closet_partition_id {
@@ -1218,7 +1242,7 @@ where
     {
         let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-        let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_partition_id);
+        let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_vector_id.0);
         let Some(min_span_tree) = &mut *min_span_tree.write().await else {
             todo!();
         };

@@ -208,6 +208,10 @@ pub fn split_partition<
     )>,
     PartitionErr,
 > {
+    if target.id != *intra_graph.2 {
+        // Should be Err
+        panic!("Ids don't match");
+    }
     if target.size < splits {
         return Err(PartitionErr::InsufficientSizeForSplits);
     }
@@ -282,6 +286,7 @@ pub fn split_partition<
             });
     }
 
+    new_partitions[0].id = target.id.clone();
     // take a node from graph & dfs to make all graphs
 
     let partition_membership: HashMap<VectorId, usize> = new_partitions
@@ -295,7 +300,7 @@ pub fn split_partition<
         })
         .flatten()
         .collect();
-    let (intra_graphs, new_inter_edges) = {
+    let mut intra_graphs = {
         let mut intra_graphs: Vec<IntraPartitionGraph<A>> = new_partitions
             .iter()
             .map(|x| IntraPartitionGraph::new(PartitionId(x.id)))
@@ -304,111 +309,195 @@ pub fn split_partition<
 
         let mut new_inter_edges: Vec<((usize, VectorId), (usize, VectorId), A)> = Vec::new();
 
-        let mut not_visited_nodes: HashSet<VectorId> =
-            target.iter().map(|vector| VectorId(vector.id)).collect();
+        let mut inserted_edges = HashSet::new();
 
-        let mut visit_stack: Vec<VectorId> = Vec::new();
+        for partition in new_partitions.iter() {
+            partition.vectors.iter()
+                .take(partition.size)
+                .map(|vector| vector.unwrap())
+                .map(|vector_index| target[vector_index].id)
+                .for_each(|vector_id| {
+                    let edges: Vec<_> =  intra_graph.0.edges(intra_graph.1[&VectorId(vector_id)])
+                        .map(|edge| (
+                            intra_graph.0.node_weight(edge.source()).unwrap(),
+                            intra_graph.0.node_weight(edge.target()).unwrap(),
+                            edge.weight()
+                        ))
+                        .collect();
+                    if edges.len() == 0 {
+                        let id = VectorId(vector_id);
+                        let idx = partition_membership[&id];
 
-        visit_stack.push(VectorId(target[new_partitions[0][0]].id));
-        let mut not_visited_nodes_size = not_visited_nodes.len();
-        while not_visited_nodes_size > 0 {
-            // println!("not_visited_nodes: {:?}", not_visited_nodes);
-            // println!("visit_stack: {:?}", visit_stack);
-
-            let current_node = match visit_stack.pop() {
-                Some(node) => node,
-                None => {
-                    let vector_id = not_visited_nodes.iter().next().unwrap().clone();
-                    visit_stack.push(vector_id);
-                    // not_visited_nodes.remove(&vector_id);
-                    continue;
-                }
-            };
-
-            if !not_visited_nodes.remove(&current_node) {
-                // already visited current node
-                continue;
-            }
-
-            let current_partition_index = partition_membership[&current_node];
-
-            // println!("current node: Partition_index({current_partition_index}) :- {current_node:?}\n\n");
-
-            if !intra_graphs[current_partition_index]
-                .1
-                .contains_key(&current_node)
-            {
-                intra_graphs[current_partition_index].add_node(current_node);
-            }
-
-            intra_graph
-                .0
-                .edges(intra_graph.1[&current_node])
-                .map(|edge| {
-                    (
-                        {
-                            let source = intra_graph.0.node_weight(edge.source()).unwrap();
-                            let target = intra_graph.0.node_weight(edge.target()).unwrap();
-                            match source == &current_node {
-                                true => *target,
-                                false => *source,
-                            }
-                        },
-                        edge.weight(),
-                    )
-                })
-                .filter(|(id, _dist)| not_visited_nodes.contains(id))
-                .for_each(|(other_node, dist)| {
-                    // Add id into new intra_graphs
-                    let other_partition_index = partition_membership[&other_node];
-
-                    if other_partition_index == current_partition_index {
-                        if !intra_graphs[other_partition_index]
-                            .1
-                            .contains_key(&other_node)
-                        {
-                            intra_graphs[other_partition_index].add_node(other_node);
+                        if !intra_graphs[idx].1.contains_key(&id) {
+                            intra_graphs[idx].add_node(id);
                         }
-
-                        intra_graphs[other_partition_index].add_edge(
-                            current_node,
-                            other_node,
-                            *dist,
-                        );
-                    } else {
-                        new_inter_edges.push((
-                            (other_partition_index, other_node),
-                            (current_partition_index, current_node),
-                            *dist,
-                        ));
                     }
+                    else {
+                        for (id_1, id_2, dist) in edges {
+                            if inserted_edges.contains(&(id_1, id_2)) {
+                                continue;
+                            }
 
-                    visit_stack.push(other_node);
+                            let idx_1 = partition_membership[id_1];
+                            let idx_2 = partition_membership[id_2];
+
+                            if !intra_graphs[idx_1].1.contains_key(id_1) {
+                                intra_graphs[idx_1].add_node(*id_1);
+                            }
+                            
+                            if !intra_graphs[idx_2].1.contains_key(id_2) {
+                                intra_graphs[idx_2].add_node(*id_2);
+                            }
+
+                            if idx_1 == idx_2 {
+                                intra_graphs[idx_1].add_edge(*id_1, *id_2, *dist);
+                            }
+                            else {
+                                new_inter_edges.push(((idx_1, *id_1), (idx_2, *id_2), *dist));
+                            }
+
+                            inserted_edges.insert((id_1, id_2));
+                            inserted_edges.insert((id_2, id_1));
+
+                        }
+                    }
                 });
-
-            not_visited_nodes_size = not_visited_nodes.len()
         }
 
-        (intra_graphs, new_inter_edges)
-    };
+        // let mut not_visited_nodes: HashSet<VectorId> =
+        //     target.iter().map(|vector| VectorId(vector.id)).collect();
+// 
+        // let mut visit_stack: Vec<VectorId> = Vec::new();
+// 
+        // visit_stack.push(VectorId(target[new_partitions[0][0]].id));
+        // let mut not_visited_nodes_size = not_visited_nodes.len();
+        // while not_visited_nodes_size > 0 {
+        //     // println!("not_visited_nodes: {:?}", not_visited_nodes);
+        //     // println!("visit_stack: {:?}", visit_stack);
+// 
+        //     let current_node = match visit_stack.pop() {
+        //         Some(node) => node,
+        //         None => {
+        //             let vector_id = not_visited_nodes.iter().next().unwrap().clone();
+        //             visit_stack.push(vector_id);
+        //             // not_visited_nodes.remove(&vector_id);
+        //             continue;
+        //         }
+        //     };
+// 
+        //     if !not_visited_nodes.remove(&current_node) {
+        //         // already visited current node
+        //         continue;
+        //     }
+// 
+        //     let current_partition_index = partition_membership[&current_node];
+// 
+        //     // println!("current node: Partition_index({current_partition_index}) :- {current_node:?}\n\n");
+// 
+        //     if !intra_graphs[current_partition_index]
+        //         .1
+        //         .contains_key(&current_node)
+        //     {
+        //         intra_graphs[current_partition_index].add_node(current_node);
+        //     }
+// 
+        //     intra_graph
+        //         .0
+        //         .edges(intra_graph.1[&current_node])
+        //         .map(|edge| {
+        //             (
+        //                 {
+        //                     let source = intra_graph.0.node_weight(edge.source()).unwrap();
+        //                     let target = intra_graph.0.node_weight(edge.target()).unwrap();
+        //                     match source == &current_node {
+        //                         true => *target,
+        //                         false => *source,
+        //                     }
+        //                 },
+        //                 edge.weight(),
+        //             )
+        //         })
+        //         .filter(|(id, _dist)| !not_visited_nodes.contains(id))
+        //         .for_each(|(other_node, dist)| {
+        //             // Add id into new intra_graphs
+        //             let other_partition_index = partition_membership[&other_node];
+// 
+        //             if other_partition_index == current_partition_index {
+        //                 if !intra_graphs[other_partition_index]
+        //                     .1
+        //                     .contains_key(&other_node)
+        //                 {
+        //                     intra_graphs[other_partition_index].add_node(other_node);
+        //                 }
+// 
+        //                 intra_graphs[other_partition_index].add_edge(
+        //                     current_node,
+        //                     other_node,
+        //                     *dist,
+        //                 );
+        //             } else {
+        //                 new_inter_edges.push((
+        //                     (other_partition_index, other_node),
+        //                     (current_partition_index, current_node),
+        //                     *dist,
+        //                 ));
+        //             }
+// 
+        //             visit_stack.push(other_node);
+        //         });
+// 
+        //     not_visited_nodes_size = not_visited_nodes.len()
+        // }
 
-    let new_partitions: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> = {
-        let mut tmp: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> =
-            new_partitions.iter().map(|x| Partition::from(x)).collect();
-
-        let _ = mem::replace(&mut tmp[0].id, target.id.clone());
-
-        // mem::swap(target, &mut tmp[0]);
-
-        tmp
-    };
-    {
-        new_partitions.iter().skip(1).for_each(|partition| {
-            inter_graph.add_node(PartitionId(partition.id));
+        intra_graphs.iter().skip(1).for_each(|graph| {
+            inter_graph.add_node(graph.2);
         });
 
-        // println!("{:#?}", inter_graph.1);
-        // println!("{:#?}", new_inter_edges);
+        let update_inter_edges: Vec<_> = inter_graph.0.edges(
+                inter_graph.1[&PartitionId(target.id)]
+            ).map(|edge| (edge.id(), edge.weight()))
+            .filter_map(|(
+                idx, 
+                (
+                    dist,
+                    id_1,
+                    id_2
+                )
+            )| {
+                match (
+                    (id_1.0 == intra_graphs[0].2, partition_membership.get(&id_1.1)),
+                    (id_2.0 == intra_graphs[0].2, partition_membership.get(&id_2.1)),
+                ) {
+                    ((true, Some(0) | None), (false, _)) => None,
+                    ((true, Some(n)), (false, _)) => Some((
+                        idx,
+                        (
+                            *dist,
+                            (intra_graphs[*n].2, id_1.1),
+                            *id_2
+                        )
+                    )),
+
+                    
+                    ((false, _), (true, Some(0) | None)) => None,
+                    ((false, _), (true, Some(n))) => Some((
+                        idx,
+                        (
+                            *dist,
+                            *id_1,
+                            (intra_graphs[*n].2, id_2.1),
+                        )
+                    )),
+
+                    _ => todo!()
+                }
+            })
+            .collect();
+
+        for (idx, (dist, id_1, id_2)) in update_inter_edges {
+            inter_graph.0.remove_edge(idx);
+            inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
+        }
 
         new_inter_edges
             .into_iter()
@@ -483,8 +572,23 @@ pub fn split_partition<
             .for_each(|(id_1, id_2, dist)| {
                 inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
             });
-    }
+        
+        intra_graphs
+    };
 
+    let new_partitions: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> = {
+        let mut tmp: Vec<Partition<A, B, PARTITION_CAP, VECTOR_CAP>> =
+            new_partitions.iter().map(|x| Partition::from(x)).collect();
+
+        tmp[0].id = target.id.clone();
+        intra_graphs.iter_mut()
+            .enumerate()
+            .for_each(|(i1, graph)| {
+                graph.2 = PartitionId(tmp[i1].id.clone())
+            });
+
+        tmp
+    };
     // Note: new_partitions[0].id = target.id -> therefore should replace target after split_target call
     let mut result: Vec<_> = new_partitions
         .into_iter()
