@@ -102,7 +102,7 @@ fn add_into_partition<
     vector: VectorEntry<A, B>,
     partition: &mut Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
 ) -> Result<(), PartitionErr> {
-    if partition.size + 1 >= PARTITION_CAP {
+    if partition.size == PARTITION_CAP {
         return Err(PartitionErr::Overflow);
     };
 
@@ -268,7 +268,10 @@ fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOr
         (PartitionId, VectorId),
     )>,
     PartitionErr,
-> where IntraPartitionGraph<A>: Debug {
+>
+where
+    IntraPartitionGraph<A>: Debug,
+{
     let node_index = min_spanning_graph.add_node(vector_id);
 
     // check if new inter_graph to replace intra_edges
@@ -363,7 +366,10 @@ fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + Partial
         (PartitionId, VectorId),
     )>,
     PartitionErr,
-> where IntraPartitionGraph<A>: Debug {
+>
+where
+    IntraPartitionGraph<A>: Debug,
+{
     let replace_inter_edges: Vec<(
         EdgeIndex,
         A,
@@ -389,14 +395,12 @@ fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + Partial
     // check if new inter_graph to replace intra_edges
     let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
         .0
-        .edges(
-            match min_spanning_graph.1.get(&target_vector_id) {
-                Some(val) => *val,
-                None => {
-                    panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
-                }
+        .edges(match min_spanning_graph.1.get(&target_vector_id) {
+            Some(val) => *val,
+            None => {
+                panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
             }
-        )
+        })
         .map(|edge| {
             (
                 edge.id(),
@@ -733,24 +737,30 @@ macro_rules! resolve_buffer {
                 loop {
                     event!(Level::DEBUG, "Attempt get least used");
                     let Some(next_unload) = least_used.next() else {
-                        
                         event!(Level::DEBUG, "Restarting least used iter");
                         least_used = $buffer.least_used_iter().await.unwrap();
                         continue;
                     };
 
-                    event!(Level::DEBUG, "Filtering values any value that is equal to load goal");
+                    event!(
+                        Level::DEBUG,
+                        "Filtering values any value that is equal to load goal"
+                    );
                     if $id == PartitionId(next_unload.1) {
                         continue;
                     }
-                    
-                    event!(Level::DEBUG, "Attempt to unload({:?}) & load({:?})", next_unload.1, $id);
+
+                    event!(
+                        Level::DEBUG,
+                        "Attempt to unload({:?}) & load({:?})",
+                        next_unload.1,
+                        $id
+                    );
                     if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
                         event!(Level::DEBUG, "Err({err:?})");
                         continue;
                     };
 
-                    
                     event!(Level::DEBUG, "Break loop and return");
                     break $buffer.access(&$id).await.unwrap();
                 }
@@ -925,7 +935,10 @@ where
 
         loop {
             let mut acquired_partitions = Vec::new();
-            event!(Level::DEBUG, "Attempt to acquired required ids that aren't loaded");
+            event!(
+                Level::DEBUG,
+                "Attempt to acquired required ids that aren't loaded"
+            );
             for id in required_partitions.iter() {
                 // Replace with try access and/or batch access
                 let Ok(partition) = partition_buffer.access(*id).await else {
@@ -943,7 +956,6 @@ where
                     }
                 }
             }
-            
 
             let mut partitions = Vec::new();
             {
@@ -1015,7 +1027,6 @@ where
             }
         }
 
-        
         event!(Level::DEBUG, "📦 Found closet vector");
         closet_id.unwrap()
     };
@@ -1058,12 +1069,11 @@ where
 
                 event!(Level::DEBUG, "OG graph: {min_span_tree:#?}");
 
-
                 {
                     let (new_partition, new_graph) = new_splits.pop().unwrap();
 
                     *partition = new_partition;
-                    
+
                     *min_span_tree = new_graph;
                     event!(Level::DEBUG, "partition - 1: {partition:?}");
                     event!(Level::DEBUG, "New graph - 1: {min_span_tree:#?}");
@@ -1073,15 +1083,15 @@ where
                 event!(Level::DEBUG, "partition - 2: {new_partition:?}");
                 event!(Level::DEBUG, "New graph - 2: {new_graph:#?}");
                 event!(Level::DEBUG, "inter: {inter_graph:#?}");
-                
 
                 //add into partition or new_partition
-                new_partition.iter()
+                new_partition
+                    .iter()
                     .map(|vector| VectorId(vector.id))
                     .for_each(|vector_id| {
                         dist_map.insert(
                             (PartitionId(new_partition.id), vector_id),
-                            dist_map[&(PartitionId(partition.id), vector_id)]
+                            dist_map[&(PartitionId(partition.id), vector_id)],
                         );
                         dist_map.remove(&(PartitionId(partition.id), vector_id));
                     });
@@ -1089,10 +1099,7 @@ where
                 let dist_old = B::dist(&value.vector, &partition.centroid());
                 let dist_new = B::dist(&value.vector, &new_partition.centroid());
 
-                event!(
-                    Level::DEBUG,
-                    "closet_vector_id = {closet_vector_id:?}"
-                );
+                event!(Level::DEBUG, "closet_vector_id = {closet_vector_id:?}");
                 event!(
                     Level::DEBUG,
                     target_partition_id = %partition.id,
@@ -1101,6 +1108,7 @@ where
                     new_partition_size = new_partition.size,
                     "Calculated distances for new and target partitions"
                 );
+                event!(Level::DEBUG, "{dist_old:?} < {dist_new:?}");
 
                 if dist_old < dist_new {
                     add_into_partition(value, partition)
@@ -1115,75 +1123,22 @@ where
                     );
 
                     if closet_vector_id.0 == closet_partition_id {
+                        
+                        {
+                            let a = closet_partition_id;
+                            let b =  PartitionId(new_partition.id);
+                            let c = closet_vector_id;
+                            let d = (PartitionId(new_partition.id), closet_vector_id.1);
+                            event!(
+                                Level::DEBUG,
+                                "Updating closet_partition_id = {a:?} -> {b:?}\tcloset_vector_id={c:?} -> {d:?}"
+                            );
+                        }
                         closet_partition_id = PartitionId(new_partition.id);
                         closet_vector_id = new_id;
                     }
                 }
 
-                // if closet_vector_id.0 == closet_partition_id {
-                //     if let Err(_) = partition_buffer.push(new_partition.clone()).await {
-                //         event!(
-                //             Level::WARN,
-                //             "Partition buffer full, unloading least-used partition"
-                //         );
-                //         let mut iter = partition_buffer.least_used_iter().await.unwrap();
-                //         loop {
-                //             let (_index, id) = match iter.next() {
-                //                 Some(val) => val,
-                //                 None => {
-                //                     iter = partition_buffer.least_used_iter().await.unwrap();
-// 
-                //                     continue;
-                //                 }
-                //             };
-// 
-                //             match partition_buffer.unload_and_push(&id, new_partition.clone()).await {
-                //                 Ok(_) => {
-                //                     break;
-                //                 }
-                //                 Err(err) => {
-                //                     event!(
-                //                         Level::WARN,
-                //                         "Buffer error in attempt to insert new split partition := {err:?}"
-                //                     );
-                //                 }
-                //             }
-                //         }
-                //     }
-                //     if let Err(_) = min_span_tree_buffer.push(new_graph.clone()).await {
-                //         event!(
-                //             Level::WARN,
-                //             "tree buffer full, unloading least-used tree"
-                //         );
-                //         let mut iter = min_span_tree_buffer.least_used_iter().await.unwrap();
-                //         loop {
-                //             let (_index, id) = match iter.next() {
-                //                 Some(val) => val,
-                //                 None => {
-                //                     iter = min_span_tree_buffer.least_used_iter().await.unwrap();
-// 
-                //                     continue;
-                //                 }
-                //             };
-// 
-                //             match min_span_tree_buffer.unload_and_push(&id, new_graph.clone()).await {
-                //                 Ok(_) => {
-                //                     break;
-                //                 }
-                //                 Err(err) => {
-                //                     event!(
-                //                         Level::WARN,
-                //                         "Buffer error in attempt to insert new split partition := {err:?}"
-                //                     );
-                //                 }
-                //             }
-                //         }
-                //     }
-// 
-                    // 
-// 
-                //     break 'add_into_partition;
-                // }
                 meta_data.insert(
                     new_partition.id,
                     Arc::new(RwLock::new(Meta::new(
@@ -1231,7 +1186,7 @@ where
 
         // update original partition
         {
-            let target_meta = &mut *meta_data[&*closet_partition_id].write().await;
+            let target_meta = &mut *meta_data[&partition.id].write().await;
 
             target_meta.size = partition.size;
             target_meta.centroid = partition.centroid();
@@ -1249,6 +1204,7 @@ where
 
         let update_inter_graph_edges = match closet_vector_id.0 == closet_partition_id {
             true => {
+                event!(Level::DEBUG, "update_local_min_span_tree");
                 update_local_min_span_tree(
                     VectorId(value.id),
                     closet_vector_id.0,
@@ -1266,6 +1222,16 @@ where
                 )
             }
             false => {
+                event!(Level::DEBUG, "update_foreign_min_span_tree");
+                {
+                    let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_partition_id);
+                    let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+                        todo!();
+                    };
+
+                    min_span_tree.add_node(VectorId(value.id));
+                }
+
                 update_foreign_min_span_tree(
                     closet_partition_id,
                     VectorId(value.id),
