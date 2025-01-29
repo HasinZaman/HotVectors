@@ -150,105 +150,6 @@ fn group_edges<A: PartialEq + Clone + Copy + Field<A>>(
     partition_map
 }
 
-// fn update_inter_graph<A: PartialEq + Clone + Copy + Field<A> + PartialOrd>(
-//     vector_id: VectorId,
-//     source_partition_id: PartitionId,
-//
-//     check_edges: &[(A, (PartitionId, VectorId), (PartitionId, VectorId))],
-//
-//     inter_graph: &mut InterPartitionGraph<A>,
-//
-//     dist_map: HashMap<(PartitionId, VectorId), A>,
-// ) -> Result<(), PartitionErr> {
-//     // might be unnessary as we can assume all inserted values will from the same
-//     let mut partition_groups: HashMap<
-//         &PartitionId,
-//         Vec<(&A, (&PartitionId, &VectorId), (&PartitionId, &VectorId))>,
-//     > = HashMap::new();
-//
-//     check_edges.iter().for_each(|(d, (p1, v1), (p2, v2))| {
-//         match partition_groups.contains_key(p1) {
-//             true => {
-//                 partition_groups
-//                     .get_mut(p1)
-//                     .expect("Key should exist")
-//                     .push((d, (p1, v1), (p2, v2)));
-//             }
-//             false => {
-//                 partition_groups.insert(p1, vec![(d, (p1, v1), (p2, v2))]);
-//             }
-//         }
-// });
-//
-//     for (partition, edge_value) in partition_groups.into_iter() {
-//         let replace_edges: Vec<(EdgeIndex, (PartitionId, VectorId))> = inter_graph
-//             .0
-//             .edges(inter_graph.1[&partition_id])
-//             .map(|edge| (edge.id(), edge.weight()))
-//             .filter_map(|(edge_index, (dist, id_1, id_2))| {
-//                 edge_value.iter().any(|(dist, tmp_id_1, tmp_id_2)| {
-//                     (id_1 == tmp_id_1 && id_2 == tmp_id_2) || (id_2 == tmp_id_1 && id_1 == tmp_id_2)
-//                 });
-//                 // match (id_1 == &(partition_id, target_vector_id), id_1.1 == target_vector_id, id_2.1 == target_vector_id) {
-//                 //     (true, true, false) => Some((edge_index, (dist, id_2))),
-//                 //     (false, false, true) => Some((edge_index, (dist, id_1))),
-//
-//                 //     (_, true, true) => panic!(),
-//
-//                 //     _ => None
-//                 // }
-//
-//                 todo!()
-//             })
-//             .filter(|(_, (dist, id))| dist < &&dist_map[*id])
-//             .map(|(edge_id, (_, id))| (edge_id, *id))
-//             .collect();
-//     }
-//
-//     // let replace_edges: Vec<(EdgeIndex, (PartitionId, VectorId))> = inter_graph.0.edges(inter_graph.1[&partition_id])
-//     //     .map(|edge|(edge.id(), edge.weight()))
-//     //     .filter_map(|(edge_index, (dist, id_1,id_2))| {
-//     //         match (id_1 == &(partition_id, target_vector_id), id_1.1 == target_vector_id, id_2.1 == target_vector_id) {
-//     //             (true, true, false) => Some((edge_index, (dist, id_2))),
-//     //             (false, false, true) => Some((edge_index, (dist, id_1))),
-//
-//     //             (_, true, true) => panic!(),
-//
-//     //             _ => None
-//     //         }
-//     //     })
-//     //     .filter(|(_, (dist, id))| {
-//     //         dist < &&dist_map[*id]
-//     //     })
-//     //     .map(|(edge_id, (_, id))| (edge_id, *id))
-//     //     .collect();
-//
-//     // // add new edges
-//     // replace_edges.iter()
-//     //     .map(|(_, (target_id))| (
-//     //         dist_map[target_id],
-//     //         *target_id,
-//     //         (source_partition_id, vector_id),
-//     //     ))
-//     //     .for_each(|(dist, id_1, id_2)| {
-//     //         inter_graph.add_edge(
-//     //             id_1.0,
-//     //             id_2.0,
-//     //             (dist, id_1, id_2)
-//     //         );
-//     //     });
-//
-//     // // remove edges
-//     // replace_edges.into_iter()
-//     //     .map(|(edge_index, _)| edge_index)
-//     //     .for_each(|edge_index| {
-//     //         inter_graph.0.remove_edge(edge_index);
-//     //     });
-//
-//     // Ok(())
-//     todo!()
-// }
-
 fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd>(
     vector_id: VectorId,
 
@@ -728,7 +629,7 @@ where
 }
 
 macro_rules! resolve_buffer {
-    ($buffer:expr, $id:expr) => {{
+    (ACCESS, $buffer:expr, $id:expr) => {{
         match $buffer.access(&$id).await {
             Ok(partition) => partition,
             Err(_) => {
@@ -764,6 +665,95 @@ macro_rules! resolve_buffer {
                     event!(Level::DEBUG, "Break loop and return");
                     break $buffer.access(&$id).await.unwrap();
                 }
+            }
+        }
+    }};
+    (ACCESS, $buffer:expr, $id:expr, $loaded_ids:expr) => {{
+        match $buffer.access(&$id).await {
+            Ok(partition) => partition,
+            Err(_) => {
+                let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+                loop {
+                    event!(Level::DEBUG, "Attempt get least used");
+                    let Some(next_unload) = least_used.next() else {
+                        event!(Level::DEBUG, "Restarting least used iter");
+                        least_used = $buffer.least_used_iter().await.unwrap();
+                        continue;
+                    };
+
+                    event!(
+                        Level::DEBUG,
+                        "Filtering values any value that is equal to load goal"
+                    );
+                    if $id == PartitionId(next_unload.1) {
+                        continue;
+                    }
+                    if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                        let unload_id = next_unload.1;
+                        let loaded_ids = $loaded_ids;
+                        event!(
+                            Level::DEBUG,
+                            "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                        );
+                        continue;
+                    }
+
+                    event!(
+                        Level::DEBUG,
+                        "Attempt to unload({:?}) & load({:?})",
+                        next_unload.1,
+                        $id
+                    );
+                    if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                        event!(Level::DEBUG, "Err({err:?})");
+                        continue;
+                    };
+
+                    event!(Level::DEBUG, "Break loop and return");
+                    break $buffer.access(&$id).await.unwrap();
+                }
+            }
+        }
+    }};
+
+    (PUSH, $buffer:expr, $value:expr, $loaded_ids:expr) => {{
+        'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
+            let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+            loop {
+                event!(Level::DEBUG, "Attempt get least used");
+                let Some(next_unload) = least_used.next() else {
+                    event!(Level::DEBUG, "Restarting least used iter");
+                    least_used = $buffer.least_used_iter().await.unwrap();
+                    continue;
+                };
+
+                event!(
+                    Level::DEBUG,
+                    "Filtering values any value that is equal to loaded values"
+                );
+                if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                    let unload_id = next_unload.1;
+                    let loaded_ids = $loaded_ids;
+                    event!(
+                        Level::DEBUG,
+                        "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                    );
+                    continue;
+                }
+
+                event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
+                if let Err(err) = $buffer
+                    .unload_and_push(&next_unload.1, $value.clone())
+                    .await
+                {
+                    event!(Level::DEBUG, "Err({err:?})");
+                    continue;
+                };
+
+                event!(Level::DEBUG, "Break loop");
+                break 'primary_loop;
             }
         }
     }};
@@ -870,7 +860,7 @@ where
     if closet_size == 0 {
         let partition_buffer = &mut *w_partition_buffer;
 
-        let partition = resolve_buffer!(partition_buffer, closet_partition_id);
+        let partition = resolve_buffer!(ACCESS, partition_buffer, closet_partition_id);
 
         let Some(partition) = &mut *partition.write().await else {
             todo!()
@@ -880,7 +870,7 @@ where
 
         let tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-        let tree = resolve_buffer!(tree_buffer, closet_partition_id);
+        let tree = resolve_buffer!(ACCESS, tree_buffer, closet_partition_id);
 
         let Some(tree) = &mut *tree.write().await else {
             todo!()
@@ -1035,7 +1025,7 @@ where
     {
         let partition_buffer = &mut *w_partition_buffer;
 
-        let partition = resolve_buffer!(partition_buffer, closet_partition_id);
+        let partition = resolve_buffer!(ACCESS, partition_buffer, closet_partition_id);
 
         let Some(partition) = &mut *partition.write().await else {
             todo!()
@@ -1054,7 +1044,8 @@ where
 
                 let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-                let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_partition_id);
+                let min_span_tree =
+                    resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
                 let min_span_tree = &mut *min_span_tree.write().await;
                 let Some(min_span_tree) = min_span_tree else {
                     todo!()
@@ -1123,10 +1114,9 @@ where
                     );
 
                     if closet_vector_id.0 == closet_partition_id {
-                        
                         {
                             let a = closet_partition_id;
-                            let b =  PartitionId(new_partition.id);
+                            let b = PartitionId(new_partition.id);
                             let c = closet_vector_id;
                             let d = (PartitionId(new_partition.id), closet_vector_id.1);
                             event!(
@@ -1134,9 +1124,10 @@ where
                                 "Updating closet_partition_id = {a:?} -> {b:?}\tcloset_vector_id={c:?} -> {d:?}"
                             );
                         }
-                        closet_partition_id = PartitionId(new_partition.id);
                         closet_vector_id = new_id;
                     }
+
+                    closet_partition_id = PartitionId(new_partition.id);
                 }
 
                 meta_data.insert(
@@ -1147,40 +1138,48 @@ where
                         new_partition.centroid(),
                     ))),
                 );
-                if let Err(_) = partition_buffer.push(new_partition.clone()).await {
-                    event!(
-                        Level::WARN,
-                        "Partition buffer full, unloading least-used partition"
-                    );
-                    let (_index, id) = partition_buffer
-                        .least_used_iter()
-                        .await
-                        .unwrap()
-                        .next()
-                        .unwrap();
 
-                    partition_buffer
-                        .unload_and_push(&id, new_partition)
-                        .await
-                        .unwrap();
-                }
-                if let Err(_) = min_span_tree_buffer.push(new_graph.clone()).await {
-                    event!(
-                        Level::WARN,
-                        "Partition buffer full, unloading least-used partition"
-                    );
-                    let (_index, id) = min_span_tree_buffer
-                        .least_used_iter()
-                        .await
-                        .unwrap()
-                        .next()
-                        .unwrap();
+                resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
+                resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [*min_span_tree.2]);
 
-                    min_span_tree_buffer
-                        .unload_and_push(&id, new_graph)
-                        .await
-                        .unwrap();
-                }
+                // if let Err(_) = partition_buffer.push(new_partition.clone()).await {
+                //     event!(
+                //         Level::WARN,
+                //         "Partition buffer full, unloading least-used partition"
+                //     );
+                //     let (_index, id) = partition_buffer
+                //         .least_used_iter()
+                //         .await
+                //         .unwrap()
+                //         .next()
+                //         .unwrap();
+                //     event!(
+                //         Level::WARN,
+                //         "Got least used id({id:?})"
+                //     );
+
+                //     partition_buffer
+                //         .unload_and_push(&id, new_partition)
+                //         .await
+                //         .unwrap();
+                // }
+                // if let Err(_) = min_span_tree_buffer.push(new_graph.clone()).await {
+                //     event!(
+                //         Level::WARN,
+                //         "Partition buffer full, unloading least-used partition"
+                //     );
+                //     let (_index, id) = min_span_tree_buffer
+                //         .least_used_iter()
+                //         .await
+                //         .unwrap()
+                //         .next()
+                //         .unwrap();
+
+                //     min_span_tree_buffer
+                //         .unload_and_push(&id, new_graph)
+                //         .await
+                //         .unwrap();
+                // }
             };
         }
 
@@ -1197,7 +1196,7 @@ where
     {
         let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-        let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_vector_id.0);
+        let min_span_tree = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_vector_id.0);
         let Some(min_span_tree) = &mut *min_span_tree.write().await else {
             todo!();
         };
@@ -1224,7 +1223,12 @@ where
             false => {
                 event!(Level::DEBUG, "update_foreign_min_span_tree");
                 {
-                    let min_span_tree = resolve_buffer!(min_span_tree_buffer, closet_partition_id);
+                    let min_span_tree = resolve_buffer!(
+                        ACCESS,
+                        min_span_tree_buffer,
+                        closet_partition_id,
+                        [*closet_vector_id.0]
+                    );
                     let Some(min_span_tree) = &mut *min_span_tree.write().await else {
                         todo!();
                     };
@@ -1298,7 +1302,7 @@ where
 
                 event!(Level::DEBUG, "Load: {partition_id:?}");
 
-                let partition = resolve_buffer!(partition_buffer, partition_id);
+                let partition = resolve_buffer!(ACCESS, partition_buffer, partition_id);
                 event!(Level::DEBUG, "Just resolved buffer");
 
                 let Some(partition) = &*partition.read().await else {
