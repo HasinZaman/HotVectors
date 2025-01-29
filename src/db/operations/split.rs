@@ -1,6 +1,6 @@
 use std::{
     array,
-    cmp::Reverse,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Debug,
     mem,
@@ -275,7 +275,7 @@ pub fn split_partition<
                     .iter()
                     .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
                     .enumerate()
-                    .min_by(|(_, x1), (_, x2)| x1.partial_cmp(x2).unwrap())
+                    .min_by(|(_, x1), (_, x2)| x1.partial_cmp(x2).unwrap_or(Ordering::Equal))
                     .unwrap();
 
                 index

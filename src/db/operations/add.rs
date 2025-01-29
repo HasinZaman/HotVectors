@@ -83,12 +83,9 @@ fn find_closet_vector<
 
                 (id, dist)
             })
-            .min_by(
-                |(id_1, dist_1), (id_2, dist_2)| match dist_1.partial_cmp(dist_2) {
-                    Some(x) => x,
-                    None => Ordering::Equal,
-                },
-            )
+            .min_by(|(id_1, dist_1), (id_2, dist_2)| {
+                dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+            })
             .unwrap()
     }
 }
@@ -955,34 +952,37 @@ where
                     }
                 }
             }
-            // possible future optimization to remove size of dist map
-            let (id, dist) = find_closet_vector(value, partitions.as_slice(), &mut dist_map);
 
-            (closet_id, closet_dist) = match closet_id {
-                None => (Some(id), Some(dist)),
-                Some(_current_id) => {
-                    if dist < closet_dist.unwrap() {
-                        (Some(id), Some(dist))
-                    } else {
-                        (closet_id, closet_dist)
+            if partitions.len() > 0 {
+                // possible future optimization to remove size of dist map
+                let (id, dist) = find_closet_vector(value, partitions.as_slice(), &mut dist_map);
+
+                (closet_id, closet_dist) = match closet_id {
+                    None => (Some(id), Some(dist)),
+                    Some(_current_id) => {
+                        if dist < closet_dist.unwrap() {
+                            (Some(id), Some(dist))
+                        } else {
+                            (closet_id, closet_dist)
+                        }
                     }
+                };
+
+                // let mut remove_index: Vec<_> =
+                partitions
+                    .iter()
+                    .map(|partition| PartitionId(partition.id))
+                    .for_each(|id| {
+                        required_partitions.remove(&id);
+                    });
+
+                if required_partitions.len() == 0 {
+                    break;
                 }
-            };
-
-            // let mut remove_index: Vec<_> =
-            partitions
-                .iter()
-                .map(|partition| PartitionId(partition.id))
-                .for_each(|id| {
-                    required_partitions.remove(&id);
-                });
-
-            if required_partitions.len() == 0 {
-                break;
+                partitions.clear();
+                acquired_partitions_locks = Vec::new();
+                acquired_partitions = Vec::new();
             }
-            partitions = Vec::new();
-            acquired_partitions_locks = Vec::new();
-            acquired_partitions = Vec::new();
             // while let Some(_) = partitions.pop() {};
             // while let Some(_) = acquired_partitions_locks.pop() {};
             // while let Some(_) = acquired_partitions.pop() {};

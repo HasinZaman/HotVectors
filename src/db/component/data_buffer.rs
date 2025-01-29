@@ -1,5 +1,6 @@
 use std::{
     array,
+    cmp::Ordering,
     collections::HashMap,
     error::Error,
     fmt::Display,
@@ -75,7 +76,6 @@ impl From<std::io::Error> for BufferError {
         // value.downcast()
 
         // Have to look every implementation of this from
-        
     }
 }
 
@@ -203,23 +203,14 @@ where
                 todo!()
             };
 
-            
             let path = &format!("{}//{}.{}", self.source, id.to_string(), B::extension());
-            event!(
-                Level::INFO,
-                "saving:{path}"
-            );
+            event!(Level::INFO, "saving:{path}");
 
             let serial_value: B = data.clone().into();
 
             let bytes = to_bytes::<rancor::Error>(&serial_value).unwrap();
 
-            tokio::fs::write(
-                path,
-                bytes.as_slice(),
-            )
-            .await
-            .unwrap();
+            tokio::fs::write(path, bytes.as_slice()).await.unwrap();
         }
     }
 
@@ -298,7 +289,7 @@ where
             .min_by(|(_, (acc_prev, acc_cur)), (_, (next_prev, next_cur))| {
                 (next_prev + next_cur)
                     .partial_cmp(&(acc_prev + acc_cur))
-                    .unwrap()
+                    .unwrap_or(Ordering::Equal)
             })
             .map(|(x, _)| x)
     }
@@ -340,7 +331,7 @@ where
     pub async fn push(&mut self, value: A) -> Result<(), BufferError> {
         let buffer_size = &mut *self.buffer_size.write().await;
 
-        if *buffer_size + 1 >= CAP {
+        if *buffer_size == CAP {
             return Err(BufferError::OutOfSpace);
         };
 
@@ -360,7 +351,6 @@ where
         index_map.insert((&value).into(), index);
         let _ = mem::replace(used_stack, Some((0, 1)));
         let _ = mem::replace(buffer, Some(value));
-        let _ = mem::replace(buffer_size, *buffer_size + 1);
 
         // add to free spot index (should be a min heap to ensure continuous blocks in the buffer)
         let _ = mem::replace(buffer_size, *buffer_size + 1);
@@ -379,7 +369,7 @@ where
 
         let buffer_size = &mut *self.buffer_size.write().await;
 
-        if *buffer_size + 1 >= CAP {
+        if *buffer_size == CAP {
             return Err(BufferError::OutOfSpace);
         }
 
@@ -393,20 +383,11 @@ where
 
         //load file
         let value: A = {
-            let file_path = &format!(
-                "{}//{}.{}",
-                self.source,
-                id.to_string(),
-                B::extension()
-            );
+            let file_path = &format!("{}//{}.{}", self.source, id.to_string(), B::extension());
 
-            event!(
-                Level::DEBUG,
-                "Load {file_path}"
-            );
+            event!(Level::DEBUG, "Load {file_path}");
 
-            let bytes = tokio::fs::read(&file_path)
-            .await?;
+            let bytes = tokio::fs::read(&file_path).await?;
 
             from_bytes::<B, rancor::Error>(&bytes)?.into()
         };
@@ -416,7 +397,6 @@ where
         index_map.insert((&value).into(), index);
         let _ = mem::replace(used_stack, Some((0, 1)));
         let _ = mem::replace(buffer, Some(value));
-        let _ = mem::replace(buffer_size, *buffer_size + 1);
 
         // add to free spot index (should be a min heap to ensure continuous blocks in the buffer)
         let _ = mem::replace(buffer_size, *buffer_size + 1);
@@ -494,26 +474,14 @@ where
         index_map.remove(id);
 
         // Export value
-        let path = &format!(
-            "{}//{}.{}",
-            self.source,
-            id.to_string(),
-            B::extension()
-        );
-        event!(
-            Level::INFO,
-            "saving: {path}"
-        );
+        let path = &format!("{}//{}.{}", self.source, id.to_string(), B::extension());
+        event!(Level::INFO, "saving: {path}");
 
         let serial_value: B = value.into();
 
         let bytes = to_bytes::<rancor::Error>(&serial_value)?;
 
-        tokio::fs::write(
-            path,
-            bytes.as_slice(),
-        )
-        .await?;
+        tokio::fs::write(path, bytes.as_slice()).await?;
 
         Ok(())
     }
@@ -523,19 +491,24 @@ where
         unload_id: &Uuid,
         load_id: &Uuid,
     ) -> Result<(), BufferError> {
+        event!(Level::INFO, "Unloading and load");
         let mut index_map = self.index_map.write().await;
+        event!(Level::DEBUG, "Acquired index_map");
 
         let index = match index_map.get(unload_id) {
             Some(index) => *index,
             None => return Err(BufferError::DataNotFound),
         };
+        event!(Level::DEBUG, "Acquired index");
+
         let used_stack = &mut *self.used_stack[index].write().await;
+        event!(Level::DEBUG, "Acquired used_stack");
 
         let buffer = &mut *self.buffer[index].write().await;
+        event!(Level::DEBUG, "Acquired buffer");
 
         //load file
         let load_value: A = {
-            
             let file_path = &format!(
                 "{}//{}.{}",
                 self.source,
@@ -543,25 +516,25 @@ where
                 B::extension()
             );
 
-            event!(
-                Level::DEBUG,
-                "Load {file_path}"
-            );
+            event!(Level::DEBUG, "Load {file_path}");
 
-            let bytes = tokio::fs::read(file_path)
-            .await?;
+            let bytes = tokio::fs::read(file_path).await?;
 
             from_bytes::<B, rancor::Error>(&bytes)?.into()
         };
+        event!(Level::DEBUG, "Loaded file");
 
         // drop data
-        let _ = mem::replace(used_stack, Some((0, 1)));
+        *used_stack = Some((0, 1));
+        event!(Level::DEBUG, "Updated used_stack");
 
         index_map.insert((&load_value).into(), index);
+        event!(Level::DEBUG, "Updated index_map");
 
         let Some(unload_value) = mem::replace(buffer, Some(load_value)) else {
             todo!()
         };
+        event!(Level::DEBUG, "Swapped unload_value with load_value");
 
         // removed id from index map
         index_map.remove(unload_id);
@@ -574,19 +547,12 @@ where
                 unload_id.to_string(),
                 B::extension()
             );
-            event!(
-                Level::INFO,
-                "saving: {path}"
-            );
+            event!(Level::INFO, "saving: {path}");
             let serial_value: B = unload_value.into();
 
             let bytes = to_bytes::<rancor::Error>(&serial_value)?;
 
-            tokio::fs::write(
-                path,
-                bytes.as_slice(),
-            )
-            .await?;
+            tokio::fs::write(path, bytes.as_slice()).await?;
         }
         Ok(())
     }
@@ -595,18 +561,22 @@ where
         unload_id: &Uuid,
         push_value: A,
     ) -> Result<(), BufferError> {
+        event!(Level::INFO, "Unloading and Pushing");
         let mut index_map = self.index_map.write().await;
+        event!(Level::DEBUG, "Acquired index_map");
 
         let index = match index_map.get(unload_id) {
             Some(index) => *index,
             None => return Err(BufferError::DataNotFound),
         };
         let used_stack = &mut *self.used_stack[index].write().await;
+        event!(Level::DEBUG, "Acquired used_stack");
 
         let buffer = &mut *self.buffer[index].write().await;
+        event!(Level::DEBUG, "Acquired buffer");
 
         // drop data
-        let _ = mem::replace(used_stack, Some((0, 1)));
+        *used_stack = Some((0, 1));
 
         index_map.insert((&push_value).into(), index);
 
@@ -624,20 +594,13 @@ where
             unload_id.to_string(),
             B::extension()
         );
-        event!(
-            Level::INFO,
-            "saving: {path}"
-        );
+        event!(Level::INFO, "saving: {path}");
 
         let serial_value: B = unload_value.into();
 
         let bytes = to_bytes::<rancor::Error>(&serial_value)?;
 
-        tokio::fs::write(
-            path,
-            bytes.as_slice(),
-        )
-        .await?;
+        tokio::fs::write(path, bytes.as_slice()).await?;
 
         Ok(())
     }
