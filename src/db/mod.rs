@@ -289,8 +289,8 @@ where
                 event!(Level::INFO, "JUST MADE A FILING CABINET🔨📈");
                 event!(Level::INFO, "💋📄 FILLING FILING CABINET 💋📄");
                 {
-                    partition_buffer.read().await.save().await;
-                    min_spanning_tree_buffer.read().await.save().await;
+                    partition_buffer.read().await.try_save().await;
+                    min_spanning_tree_buffer.read().await.try_save().await;
 
                     inter_spanning_graph
                         .read()
@@ -338,55 +338,78 @@ where
             (false, false) => panic!("Messed up file environment"),
         }
 
-        // {
-        //     let partition_buffer = partition_buffer.clone();
-        //     let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+        {
+            let partition_buffer = partition_buffer.clone();
+            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
 
-        //     rt.spawn(async move {
-        //         loop {
-        //             sleep(Duration::from_secs(10)).await;
+            rt.spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(10)).await;
 
-        //             {
-        //                 event!(Level::INFO, "DECREMENTING partition_buffer 👠😎");
-        //                 partition_buffer.write().await.de_increment();
-        //             }
-        //             {
-        //                 event!(Level::INFO, "DECREMENTING min_spanning_tree_buffer 👠😎");
-        //                 min_spanning_tree_buffer.write().await.de_increment();
-        //             }
-        //         }
-        //     });
-        // }
+                    {
+                        event!(Level::INFO, "DECREMENTING partition_buffer 👠😎");
+                        partition_buffer.write().await.de_increment();
+                    }
+                    {
+                        event!(Level::INFO, "DECREMENTING min_spanning_tree_buffer 👠😎");
+                        min_spanning_tree_buffer.write().await.de_increment();
+                    }
+                }
+            });
+        }
 
-        // {
-        //     let meta_data = meta_data.clone();
-        //     let inter_spanning_graph = inter_spanning_graph.clone();
+        {
+            let meta_data = meta_data.clone();
+            let inter_spanning_graph = inter_spanning_graph.clone();
 
-        //     rt.spawn(async move {
-        //         loop {
-        //             sleep(Duration::from_secs(20)).await; //60 * 1)).await;
-        //             {
-        //                 event!(Level::INFO, "Saving inter_spanning_graph 👠😎");
-        //                 let inter_spanning_graph = {
-        //                     let rwlock = &*inter_spanning_graph.read().await;
+            rt.spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(20)).await; //60 * 1)).await;
+                    {
+                        event!(Level::INFO, "Saving inter_spanning_graph 👠😎");
+                        let inter_spanning_graph = {
+                            let rwlock = &*inter_spanning_graph.read().await;
 
-        //                     rwlock.clone()
-        //                 };
-        //                 inter_spanning_graph
-        //                     .save(PERSISTENT_DIR, GLOBAL_MIN_SPAN_FILE)
-        //                     .await;
-        //             }
-        //             {
-        //                 event!(Level::INFO, "Saving meta_data 👠😎");
-        //                 for (id, data) in meta_data.read().await.iter() {
-        //                     let data = &*data.read().await;
+                            rwlock.clone()
+                        };
+                        inter_spanning_graph
+                            .save(PERSISTENT_DIR, GLOBAL_MIN_SPAN_FILE)
+                            .await;
+                    }
+                    {
+                        event!(Level::INFO, "Saving meta_data 👠😎");
+                        for (id, data) in meta_data.read().await.iter() {
+                            let data = &*data.read().await;
 
-        //                     data.save(META_DATA_DIR, &id.to_string()).await;
-        //                 }
-        //             }
-        //         }
-        //     });
-        // }
+                            data.save(META_DATA_DIR, &id.to_string()).await;
+                        }
+                    }
+                }
+            });
+        }
+
+        {
+            let partition_buffer = partition_buffer.clone();
+            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+
+            rt.spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(40)).await; //60 * 1)).await;
+                    {
+                        event!(Level::INFO, "saving contents of partition_buffer");
+                        let w_partition_buffer_lock = partition_buffer.read().await;
+                        let partition_buffer = &*w_partition_buffer_lock;
+                        partition_buffer.try_save().await;
+                    }
+                    {
+                        event!(Level::INFO, "saving contents of min_spanning_tree_buffer");
+                        let w_min_spanning_tree_buffer = min_spanning_tree_buffer.read().await;
+                        let min_spanning_tree_buffer = &*w_min_spanning_tree_buffer;
+                        min_spanning_tree_buffer.try_save().await;
+                    }
+                }
+            });
+        }
         event!(Level::INFO, "I'M ALL HOT TO GO👠👠");
         loop {
             let (cmd, tx) = cmd_input.recv().await.unwrap();
