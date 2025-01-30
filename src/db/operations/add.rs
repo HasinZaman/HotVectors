@@ -626,93 +626,111 @@ where
 }
 
 macro_rules! resolve_buffer {
-    (ACCESS, $buffer:expr, $id:expr) => {{
-        match $buffer.access(&$id).await {
-            Ok(partition) => partition,
-            Err(_) => {
-                let mut least_used = $buffer.least_used_iter().await.unwrap();
-
-                loop {
-                    event!(Level::DEBUG, "Attempt get least used");
-                    let Some(next_unload) = least_used.next() else {
-                        event!(Level::DEBUG, "Restarting least used iter");
-                        least_used = $buffer.least_used_iter().await.unwrap();
-                        continue;
+    (ACCESS, $buffer:expr, $id:expr) => {
+        'buffer_access: {
+            match $buffer.access(&$id).await {
+                Ok(value) => value,
+                Err(_) => {
+                    if let Ok(_) = $buffer.load(&$id).await {
+                        break 'buffer_access $buffer.access(&$id).await.unwrap();
                     };
 
-                    event!(
-                        Level::DEBUG,
-                        "Filtering values any value that is equal to load goal"
-                    );
-                    if $id == PartitionId(next_unload.1) {
-                        continue;
-                    }
+                    let mut least_used = $buffer.least_used_iter().await.unwrap();
 
-                    event!(
-                        Level::DEBUG,
-                        "Attempt to unload({:?}) & load({:?})",
-                        next_unload.1,
-                        $id
-                    );
-                    if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
-                        event!(Level::DEBUG, "Err({err:?})");
-                        continue;
-                    };
+                    loop {
+                        event!(Level::DEBUG, "Attempt get least used");
+                        let Some(next_unload) = least_used.next() else {
+                            event!(Level::DEBUG, "Restarting least used iter");
+                            least_used = match $buffer.least_used_iter().await {
+                                Some(val) => val,
+                                None => continue,
+                            };
+                            continue;
+                        };
 
-                    event!(Level::DEBUG, "Break loop and return");
-                    break $buffer.access(&$id).await.unwrap();
-                }
-            }
-        }
-    }};
-    (ACCESS, $buffer:expr, $id:expr, $loaded_ids:expr) => {{
-        match $buffer.access(&$id).await {
-            Ok(partition) => partition,
-            Err(_) => {
-                let mut least_used = $buffer.least_used_iter().await.unwrap();
-
-                loop {
-                    event!(Level::DEBUG, "Attempt get least used");
-                    let Some(next_unload) = least_used.next() else {
-                        event!(Level::DEBUG, "Restarting least used iter");
-                        least_used = $buffer.least_used_iter().await.unwrap();
-                        continue;
-                    };
-
-                    event!(
-                        Level::DEBUG,
-                        "Filtering values any value that is equal to load goal"
-                    );
-                    if $id == PartitionId(next_unload.1) {
-                        continue;
-                    }
-                    if $loaded_ids.iter().any(|id| id == &next_unload.1) {
-                        let unload_id = next_unload.1;
-                        let loaded_ids = $loaded_ids;
                         event!(
                             Level::DEBUG,
-                            "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                            "Filtering values any value that is equal to load goal"
                         );
-                        continue;
+                        if $id == PartitionId(next_unload.1) {
+                            continue;
+                        }
+
+                        event!(
+                            Level::DEBUG,
+                            "Attempt to unload({:?}) & load({:?})",
+                            next_unload.1,
+                            $id
+                        );
+                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                            event!(Level::DEBUG, "Err({err:?})");
+                            continue;
+                        };
+
+                        event!(Level::DEBUG, "Break loop and return");
+                        break $buffer.access(&$id).await.unwrap();
                     }
-
-                    event!(
-                        Level::DEBUG,
-                        "Attempt to unload({:?}) & load({:?})",
-                        next_unload.1,
-                        $id
-                    );
-                    if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
-                        event!(Level::DEBUG, "Err({err:?})");
-                        continue;
-                    };
-
-                    event!(Level::DEBUG, "Break loop and return");
-                    break $buffer.access(&$id).await.unwrap();
                 }
             }
         }
-    }};
+    };
+    (ACCESS, $buffer:expr, $id:expr, $loaded_ids:expr) => {
+        'buffer_access: {
+            match $buffer.access(&$id).await {
+                Ok(partition) => partition,
+                Err(_) => {
+                    if let Ok(_) = $buffer.load(&$id).await {
+                        break 'buffer_access $buffer.access(&$id).await.unwrap();
+                    };
+
+                    let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+                    loop {
+                        event!(Level::DEBUG, "Attempt get least used");
+                        let Some(next_unload) = least_used.next() else {
+                            event!(Level::DEBUG, "Restarting least used iter");
+                            least_used = match $buffer.least_used_iter().await {
+                                Some(val) => val,
+                                None => continue,
+                            };
+                            continue;
+                        };
+
+                        event!(
+                            Level::DEBUG,
+                            "Filtering values any value that is equal to load goal"
+                        );
+                        if $id == PartitionId(next_unload.1) {
+                            continue;
+                        }
+                        if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                            let unload_id = next_unload.1;
+                            let loaded_ids = $loaded_ids;
+                            event!(
+                                Level::DEBUG,
+                                "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                            );
+                            continue;
+                        }
+
+                        event!(
+                            Level::DEBUG,
+                            "Attempt to unload({:?}) & load({:?})",
+                            next_unload.1,
+                            $id
+                        );
+                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                            event!(Level::DEBUG, "Err({err:?})");
+                            continue;
+                        };
+
+                        event!(Level::DEBUG, "Break loop and return");
+                        break $buffer.access(&$id).await.unwrap();
+                    }
+                }
+            }
+        }
+    };
 
     (PUSH, $buffer:expr, $value:expr, $loaded_ids:expr) => {{
         'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
@@ -983,17 +1001,9 @@ where
                 acquired_partitions_locks = Vec::new();
                 acquired_partitions = Vec::new();
             }
-            // while let Some(_) = partitions.pop() {};
-            // while let Some(_) = acquired_partitions_locks.pop() {};
-            // while let Some(_) = acquired_partitions.pop() {};
 
             //unload and swap
-            let mut least_used = partition_buffer
-                .least_used_iter()
-                .await
-                .unwrap()
-                .filter(|(_index, id)| !required_partitions.contains(&PartitionId(*id)));
-            // .collect();
+            let mut least_used = partition_buffer.least_used_iter().await;
 
             for id in required_partitions.clone() {
                 match partition_buffer.load(&*id).await {
@@ -1003,8 +1013,17 @@ where
                     }
                     Err(BufferError::OutOfSpace) => {
                         event!(Level::DEBUG, "📦 Unload and Load buffer space");
+
+                        let Some(least_used) = &mut least_used else {
+                            continue;
+                        };
+
+                        let Some(unload_id) = least_used.next() else {
+                            break;
+                        };
+
                         partition_buffer
-                            .unload_and_load(&least_used.next().unwrap().1, &*id)
+                            .unload_and_load(&unload_id.1, &*id)
                             .await
                             .unwrap();
                         // partitions.push(partition_buffer.access(&*id).await.unwrap());
@@ -1082,7 +1101,13 @@ where
                     .for_each(|vector_id| {
                         dist_map.insert(
                             (PartitionId(new_partition.id), vector_id),
-                            dist_map[&(PartitionId(partition.id), vector_id)],
+                            *dist_map
+                                .get(&(PartitionId(partition.id), vector_id))
+                                .expect(&format!(
+                                    "Expect {:?} in {:?}",
+                                    (PartitionId(partition.id), vector_id),
+                                    dist_map
+                                )),
                         );
                         dist_map.remove(&(PartitionId(partition.id), vector_id));
                     });
@@ -1101,31 +1126,33 @@ where
                 );
                 event!(Level::DEBUG, "{dist_old:?} < {dist_new:?}");
 
+                if closet_vector_id.0 == closet_partition_id
+                    && new_graph.1.contains_key(&closet_vector_id.1)
+                {
+                    let new_id = (PartitionId(new_partition.id), closet_vector_id.1);
+                    event!(
+                        Level::DEBUG,
+                        "closet_vector_id:{closet_vector_id:?}\tcloset_partition_id:{closet_partition_id:?}\tChanged closet id from = {closet_vector_id:?} -> {new_id:?}"
+                    );
+                    {
+                        let a = closet_partition_id;
+                        let b = PartitionId(new_partition.id);
+                        let c = closet_vector_id;
+                        let d = (PartitionId(new_partition.id), closet_vector_id.1);
+                        event!(
+                            Level::DEBUG,
+                            "Updating closet_partition_id = {a:?} -> {b:?}\tcloset_vector_id={c:?} -> {d:?}"
+                        );
+                    }
+                    closet_vector_id = new_id;
+                }
+
                 if dist_old < dist_new {
                     add_into_partition(value, partition)
                         .expect("Partition should now have space but an error occurred");
                 } else {
                     add_into_partition(value, &mut new_partition)
                         .expect("Partition should now have space but an error occurred");
-                    let new_id = (PartitionId(new_partition.id), closet_vector_id.1);
-                    event!(
-                        Level::DEBUG,
-                        "closet_vector_id:{closet_vector_id:?}\tcloset_partition_id:{closet_partition_id:?}\tChanged closet id from = {closet_vector_id:?} -> {new_id:?}"
-                    );
-
-                    if closet_vector_id.0 == closet_partition_id {
-                        {
-                            let a = closet_partition_id;
-                            let b = PartitionId(new_partition.id);
-                            let c = closet_vector_id;
-                            let d = (PartitionId(new_partition.id), closet_vector_id.1);
-                            event!(
-                                Level::DEBUG,
-                                "Updating closet_partition_id = {a:?} -> {b:?}\tcloset_vector_id={c:?} -> {d:?}"
-                            );
-                        }
-                        closet_vector_id = new_id;
-                    }
 
                     closet_partition_id = PartitionId(new_partition.id);
                 }
@@ -1141,45 +1168,6 @@ where
 
                 resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
                 resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [*min_span_tree.2]);
-
-                // if let Err(_) = partition_buffer.push(new_partition.clone()).await {
-                //     event!(
-                //         Level::WARN,
-                //         "Partition buffer full, unloading least-used partition"
-                //     );
-                //     let (_index, id) = partition_buffer
-                //         .least_used_iter()
-                //         .await
-                //         .unwrap()
-                //         .next()
-                //         .unwrap();
-                //     event!(
-                //         Level::WARN,
-                //         "Got least used id({id:?})"
-                //     );
-
-                //     partition_buffer
-                //         .unload_and_push(&id, new_partition)
-                //         .await
-                //         .unwrap();
-                // }
-                // if let Err(_) = min_span_tree_buffer.push(new_graph.clone()).await {
-                //     event!(
-                //         Level::WARN,
-                //         "Partition buffer full, unloading least-used partition"
-                //     );
-                //     let (_index, id) = min_span_tree_buffer
-                //         .least_used_iter()
-                //         .await
-                //         .unwrap()
-                //         .next()
-                //         .unwrap();
-
-                //     min_span_tree_buffer
-                //         .unload_and_push(&id, new_graph)
-                //         .await
-                //         .unwrap();
-                // }
             };
         }
 
