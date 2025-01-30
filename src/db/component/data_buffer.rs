@@ -186,22 +186,22 @@ where
             buffer: array::from_fn(|_| Arc::new(RwLock::new(None))),
             used_stack: array::from_fn(|_| RwLock::new(None)),
             buffer_size: RwLock::new(0),
-            empty_index_stack: RwLock::new(array::from_fn(|i| Some(CAP - i))),
+            empty_index_stack: RwLock::new(array::from_fn(|i| Some(CAP - 1 - i))),
             empty_index_size: RwLock::new(CAP),
             index_map: RwLock::new(HashMap::new()),
             _phantom_data: PhantomData,
         }
     }
 
-    pub async fn save(&self) {
-        let iter = self.index_map.read().await.iter();
-
+    pub async fn try_save(&self) {
         for (id, index) in &*self.index_map.read().await {
             let index = *index;
 
-            let Some(data) = &*self.buffer[index].read().await else {
-                todo!()
+            let Ok(data) = self.buffer[index].try_read() else {
+                continue;
             };
+
+            let Some(data) = &*data else { todo!() };
 
             let path = &format!("{}//{}.{}", self.source, id.to_string(), B::extension());
             event!(Level::INFO, "saving:{path}");
@@ -376,7 +376,7 @@ where
         let empty_index_stack = &mut *self.empty_index_stack.write().await;
         let empty_index_size = &mut *self.empty_index_size.write().await;
 
-        let index = empty_index_stack[*empty_index_size].unwrap();
+        let index = empty_index_stack[*empty_index_size - 1].unwrap();
 
         let buffer = &mut *self.buffer[index].write().await;
         let used_stack = &mut *self.used_stack[index].write().await;
