@@ -222,71 +222,86 @@ pub fn split_partition<
         todo!()
     }
 
-    let mut prev_partitions: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
-        (0..splits).map(|_| PartitionSubSet::new(&target)).collect();
-    let mut new_partitions = {
-        // Get closet vector to centeroid
-        let mut start_points: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
-            (0..splits).map(|_| PartitionSubSet::new(&target)).collect(); // Vec::with_capacity(splits);
+    let new_partitions = {
+        let mut iteration_count = 0;
+        loop {
+            let mut prev_partitions: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
+                (0..splits).map(|_| PartitionSubSet::new(&target)).collect();
+            let mut new_partitions = {
+                // Get closest vector to centroid
+                let mut start_points: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
+                    (0..splits).map(|_| PartitionSubSet::new(&target)).collect();
 
-        let centroid = target.centroid();
+                let centroid = target.centroid();
 
-        let mut distance = target
-            .iter()
-            .map(|vector| B::dist(&centroid, &vector.vector))
-            .enumerate()
-            .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
-            .collect::<Vec<KeyValuePair<usize, A>>>();
-
-        if distance.len() == 0 {
-            todo!()
-        }
-
-        make_heap(&mut distance);
-
-        start_points.iter_mut().for_each(|subset| {
-            pop_heap(&mut distance);
-            let KeyValuePair(ref_index, Reverse(_dist)) = distance.pop().unwrap();
-
-            if let Err(err) = subset.add(ref_index) {
-                todo!()
-            }
-        });
-
-        start_points
-    };
-
-    // find closet_partition
-    while prev_partitions
-        .iter()
-        .zip(new_partitions.iter())
-        .all(|(x, y)| x.vectors != y.vectors)
-    {
-        mem::swap(&mut prev_partitions, &mut new_partitions);
-
-        new_partitions.iter_mut().for_each(|x| x.clear());
-
-        // CPU solution
-        target
-            .iter()
-            .map(|vector| vector.vector)
-            .map(|vector| {
-                let (index, _) = prev_partitions
+                let mut distance = target
                     .iter()
-                    .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
+                    .map(|vector| B::dist(&centroid, &vector.vector))
                     .enumerate()
-                    .min_by(|(_, x1), (_, x2)| x1.partial_cmp(x2).unwrap_or(Ordering::Equal))
-                    .unwrap();
+                    .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
+                    .collect::<Vec<KeyValuePair<usize, A>>>();
 
-                index
-            })
-            .enumerate()
-            .for_each(|(vector_index, partition_index)| {
-                new_partitions[partition_index].add(vector_index).unwrap();
-            });
-    }
+                if distance.is_empty() {
+                    todo!()
+                }
 
-    new_partitions[0].id = target.id.clone();
+                make_heap(&mut distance);
+
+                // Rotate the starting point deterministically
+                let rotation_offset = iteration_count % distance.len();
+                distance.rotate_left(rotation_offset);
+
+                start_points.iter_mut().for_each(|subset| {
+                    pop_heap(&mut distance);
+                    let KeyValuePair(ref_index, Reverse(_dist)) = distance.pop().unwrap();
+
+                    if let Err(err) = subset.add(ref_index) {
+                        todo!()
+                    }
+                });
+
+                start_points
+            };
+
+            // find closet_partition
+            while prev_partitions
+                .iter()
+                .zip(new_partitions.iter())
+                .all(|(x, y)| x.vectors != y.vectors)
+            {
+                mem::swap(&mut prev_partitions, &mut new_partitions);
+
+                new_partitions.iter_mut().for_each(|x| x.clear());
+
+                // CPU solution
+                target
+                    .iter()
+                    .map(|vector| vector.vector)
+                    .map(|vector| {
+                        let (index, _) = prev_partitions
+                            .iter()
+                            .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
+                            .enumerate()
+                            .min_by(|(_, x1), (_, x2)| x1.partial_cmp(x2).unwrap_or(Ordering::Less))
+                            .unwrap();
+
+                        index
+                    })
+                    .enumerate()
+                    .for_each(|(vector_index, partition_index)| {
+                        new_partitions[partition_index].add(vector_index).unwrap();
+                    });
+            }
+
+            if !new_partitions.iter().any(|s| s.size == target.size) {
+                new_partitions[0].id = target.id.clone();
+
+                break new_partitions;
+            }
+
+            iteration_count += 1;
+        }
+    };
     // take a node from graph & dfs to make all graphs
 
     let partition_membership: HashMap<VectorId, usize> = new_partitions
