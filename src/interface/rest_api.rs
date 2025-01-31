@@ -78,6 +78,46 @@ where
     }
 }
 
+async fn insert_batch_vector_route<
+    A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + 'static,
+    B: VectorSpace<A> + Sized + Send + Sync + 'static + TryFrom<Vec<f32>>,
+>(
+    State(state): State<Arc<AppState<A, B>>>,
+    Json(payload): Json<Vec<VectorData<f32>>>,
+) -> Json<String>
+where
+    <B as TryFrom<Vec<f32>>>::Error: Debug,
+{
+    let (tx, mut rx) = channel(2);
+
+    let mut results = Vec::with_capacity(payload.len());
+    println!("INSERT BATCH VECTOR");
+    for vector in payload {
+        let vector = vector.vector;
+        println!("{:?}", vector);
+
+        let _ = state
+            .sender
+            .send((
+                Cmd::Atomic(AtomicCmd::InsertVector {
+                    vector: B::try_from(vector).unwrap(),
+                    transaction_id: None,
+                }),
+                tx.clone(),
+            ))
+            .await;
+
+        results.push(rx.recv().await);
+    }
+
+    match results.iter().all(|x| x.is_some()) {
+        true => Json("Vector received".to_string()),
+        false => {
+            todo!()
+        }
+    }
+}
+
 async fn metadata_route<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Sized + Send + Sync>(
     State(state): State<Arc<AppState<A, B>>>,
 ) -> Json<String>
@@ -131,6 +171,7 @@ where
 
     let app = Router::new()
         .route("/insert", post(insert_vector_route::<A, B>))
+        .route("/insert_batch", post(insert_batch_vector_route::<A, B>))
         .route("/metadata", post(metadata_route::<A, B>))
         .with_state(shared_state);
 

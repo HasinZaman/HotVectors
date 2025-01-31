@@ -528,7 +528,7 @@ where
     event!(Level::DEBUG, "🔒 Locked `meta_data`");
 
     let mut w_partition_buffer = partition_buffer.write().await;
-    
+
     event!(Level::DEBUG, "🔒 Locked `partition_buffer`");
 
     let mut w_min_spanning_tree_buffer = min_spanning_tree_buffer.write().await;
@@ -773,17 +773,22 @@ where
                     todo!()
                 };
 
-                let Ok(mut new_splits) = split_partition(partition, min_span_tree, 2, inter_graph)
+                let Ok([new_split_2, new_split_1]) =
+                    split_partition(partition, min_span_tree, inter_graph)
                 else {
                     panic!()
                 };
+                // let Ok(mut new_splits) = split_partition(partition, min_span_tree, 2, inter_graph)
+                // else {
+                //     panic!()
+                // };
 
-                event!(Level::DEBUG, "New split size: {}", new_splits.len());
+                // event!(Level::DEBUG, "New split size: {}", new_splits.len());
 
                 event!(Level::DEBUG, "OG graph: {min_span_tree:#?}");
 
                 {
-                    let (new_partition, new_graph) = new_splits.pop().unwrap();
+                    let (new_partition, new_graph) = new_split_1;
 
                     *partition = new_partition;
 
@@ -792,7 +797,7 @@ where
                     event!(Level::DEBUG, "New graph - 1: {min_span_tree:#?}");
                 }
 
-                let (mut new_partition, new_graph) = new_splits.pop().unwrap();
+                let (mut new_partition, new_graph) = new_split_2;
                 event!(Level::DEBUG, "partition - 2: {new_partition:?}");
                 event!(Level::DEBUG, "New graph - 2: {new_graph:#?}");
                 event!(Level::DEBUG, "inter: {inter_graph:#?}");
@@ -1016,6 +1021,4 @@ where
 }
 
 #[cfg(test)]
-mod test {
-
-}
+mod test {}

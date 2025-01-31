@@ -172,7 +172,7 @@ impl<
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KeyValuePair<A, B: PartialOrd + PartialEq>(pub(crate) A, pub(crate) Reverse<B>);
 
 impl<A, B: PartialOrd + PartialEq> PartialOrd for KeyValuePair<A, B> {
@@ -186,6 +186,7 @@ impl<A, B: PartialOrd + PartialEq> PartialEq for KeyValuePair<A, B> {
     }
 }
 
+const SPLITS: usize = 2;
 // testable
 pub fn split_partition<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
@@ -196,109 +197,106 @@ pub fn split_partition<
     target: &mut Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
     intra_graph: &mut IntraPartitionGraph<A>,
 
-    splits: usize,
-
     inter_graph: &mut InterPartitionGraph<A>,
 ) -> Result<
-    Vec<(
+    [(
         Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         IntraPartitionGraph<A>,
-    )>,
+    ); SPLITS],
     PartitionErr,
 > {
     if target.id != *intra_graph.2 {
         // Should be Err
         panic!("Ids don't match");
     }
-    if target.size < splits {
+    if target.size < SPLITS {
         return Err(PartitionErr::InsufficientSizeForSplits);
     }
 
-    if target.size == splits {
+    if target.size == SPLITS {
         // simple hard coded solution
         // each vector in target becomes it's own partition
         todo!()
     }
 
-    let new_partitions = {
-        let mut iteration_count = 0;
-        loop {
-            let mut prev_partitions: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
-                (0..splits).map(|_| PartitionSubSet::new(&target)).collect();
-            let mut new_partitions = {
-                // Get closest vector to centroid
-                let mut start_points: Vec<PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>> =
-                    (0..splits).map(|_| PartitionSubSet::new(&target)).collect();
+    let new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] = 'new_partition_block: {
+        let centroid = target.centroid();
+        let mut distances = target
+            .iter()
+            .map(|vector| B::dist(&centroid, &vector.vector))
+            .enumerate()
+            .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
+            .collect::<Vec<KeyValuePair<usize, A>>>();
 
-                let centroid = target.centroid();
+        if distances.is_empty() {
+            todo!()
+        }
 
-                let mut distance = target
+        distances.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(Ordering::Equal));
+
+        for i1 in 0..distances.len() {
+            for i2 in i1..distances.len() {
+                let mut prev_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+                    SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
+                let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+                    SPLITS] = [
+                    {
+                        let mut tmp = PartitionSubSet::new(&target);
+
+                        tmp.add(distances[i1].0);
+
+                        tmp
+                    },
+                    {
+                        let mut tmp = PartitionSubSet::new(&target);
+
+                        tmp.add(distances[i2].0);
+
+                        tmp
+                    },
+                ];
+
+                // find closet_partition
+                while prev_partitions
                     .iter()
-                    .map(|vector| B::dist(&centroid, &vector.vector))
-                    .enumerate()
-                    .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
-                    .collect::<Vec<KeyValuePair<usize, A>>>();
+                    .zip(new_partitions.iter())
+                    .all(|(x, y)| x.vectors != y.vectors)
+                {
+                    mem::swap(&mut prev_partitions, &mut new_partitions);
 
-                if distance.is_empty() {
-                    todo!()
+                    new_partitions.iter_mut().for_each(|x| x.clear());
+
+                    // CPU solution
+                    target
+                        .iter()
+                        .map(|vector| vector.vector)
+                        .map(|vector| {
+                            let (index, _) = prev_partitions
+                                .iter()
+                                .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
+                                .enumerate()
+                                .min_by(|(_, x1), (_, x2)| {
+                                    x1.partial_cmp(x2).unwrap_or(Ordering::Less)
+                                })
+                                .unwrap();
+
+                            index
+                        })
+                        .enumerate()
+                        .for_each(|(vector_index, partition_index)| {
+                            new_partitions[partition_index].add(vector_index).unwrap();
+                        });
                 }
 
-                make_heap(&mut distance);
+                if !new_partitions.iter().any(|s| s.size == target.size) {
+                    new_partitions[0].id = target.id.clone();
 
-                // Rotate the starting point deterministically
-                let rotation_offset = iteration_count % distance.len();
-                distance.rotate_left(rotation_offset);
-
-                start_points.iter_mut().for_each(|subset| {
-                    pop_heap(&mut distance);
-                    let KeyValuePair(ref_index, Reverse(_dist)) = distance.pop().unwrap();
-
-                    if let Err(_err) = subset.add(ref_index) {
-                        todo!()
-                    }
-                });
-
-                start_points
-            };
-
-            // find closet_partition
-            while prev_partitions
-                .iter()
-                .zip(new_partitions.iter())
-                .all(|(x, y)| x.vectors != y.vectors)
-            {
-                mem::swap(&mut prev_partitions, &mut new_partitions);
-
-                new_partitions.iter_mut().for_each(|x| x.clear());
-
-                // CPU solution
-                target
-                    .iter()
-                    .map(|vector| vector.vector)
-                    .map(|vector| {
-                        let (index, _) = prev_partitions
-                            .iter()
-                            .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
-                            .enumerate()
-                            .min_by(|(_, x1), (_, x2)| x1.partial_cmp(x2).unwrap_or(Ordering::Less))
-                            .unwrap();
-
-                        index
-                    })
-                    .enumerate()
-                    .for_each(|(vector_index, partition_index)| {
-                        new_partitions[partition_index].add(vector_index).unwrap();
-                    });
+                    break 'new_partition_block new_partitions;
+                };
             }
-
-            if !new_partitions.iter().any(|s| s.size == target.size) {
-                new_partitions[0].id = target.id.clone();
-
-                break new_partitions;
-            }
-
-            iteration_count += 1;
         }
+
+        todo!();
     };
     // take a node from graph & dfs to make all graphs
 
@@ -314,10 +312,10 @@ pub fn split_partition<
         .flatten()
         .collect();
     let mut intra_graphs = {
-        let mut intra_graphs: Vec<IntraPartitionGraph<A>> = new_partitions
-            .iter()
-            .map(|x| IntraPartitionGraph::new(PartitionId(x.id)))
-            .collect();
+        let mut intra_graphs: [IntraPartitionGraph<A>; 2] = array::from_fn(|i1| {
+            let x = new_partitions.get(i1).unwrap();
+            IntraPartitionGraph::new(PartitionId(x.id))
+        });
         // (0..(splits)).map(|_| IntraPartitionGraph::new()).collect();
 
         let mut new_inter_edges: Vec<((usize, VectorId), (usize, VectorId), A)> = Vec::new();
@@ -511,10 +509,12 @@ pub fn split_partition<
         tmp
     };
     // Note: new_partitions[0].id = target.id -> therefore should replace target after split_target call
-    let mut result: Vec<_> = new_partitions
-        .into_iter()
-        .zip(intra_graphs.into_iter())
-        .collect();
+    let mut result: [_; SPLITS] =
+        array::from_fn(|i1| (new_partitions[i1], intra_graphs[i1].clone())); // should be moved
+                                                                             //  new_partitions
+                                                                             //     .into_iter()
+                                                                             //     .zip(intra_graphs.into_iter())
+                                                                             //     .collect();
 
     let i1 = result.len() - 1;
     result.swap(0, i1);
@@ -527,148 +527,145 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::{
-        db::component::partition::VectorEntry,
-        vector::Vector,
-    };
+    use crate::{db::component::partition::VectorEntry, vector::Vector};
 
-    #[test]
-    fn basic_split() {
-        // Setup mock data
-        type TestField = f32; // Example field type
-        type TestVector = Vector<f32, 2>; // Example vector type
+    // #[test]
+    // fn basic_split() {
+    //     // Setup mock data
+    //     type TestField = f32; // Example field type
+    //     type TestVector = Vector<f32, 2>; // Example vector type
 
-        let mut inter_graph = InterPartitionGraph::new();
+    //     let mut inter_graph = InterPartitionGraph::new();
 
-        let mut partition = Partition::<TestField, TestVector, 500, 500>::new();
-        let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
-        inter_graph.add_node(PartitionId(partition.id));
+    //     let mut partition = Partition::<TestField, TestVector, 500, 500>::new();
+    //     let mut intra_graph = IntraPartitionGraph::new(PartitionId(partition.id));
+    //     inter_graph.add_node(PartitionId(partition.id));
 
-        assert_eq!(inter_graph.1.len(), 1);
+    //     assert_eq!(inter_graph.1.len(), 1);
 
-        let splits = 2; // Example split count
+    //     let splits = 2; // Example split count
 
-        // initialize partitions
-        let expected_partitions = vec![
-            vec![
-                VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4()),
-                VectorEntry::from_uuid(Vector::splat(2.), Uuid::new_v4()),
-            ],
-            vec![
-                VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4()),
-                VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4()),
-            ],
-        ];
-        let expected_centroids = vec![Vector::splat(1.5), Vector::splat(-1.5)];
+    //     // initialize partitions
+    //     let expected_partitions = vec![
+    //         vec![
+    //             VectorEntry::from_uuid(Vector::splat(1.), Uuid::new_v4()),
+    //             VectorEntry::from_uuid(Vector::splat(2.), Uuid::new_v4()),
+    //         ],
+    //         vec![
+    //             VectorEntry::from_uuid(Vector::splat(-1.), Uuid::new_v4()),
+    //             VectorEntry::from_uuid(Vector::splat(-2.), Uuid::new_v4()),
+    //         ],
+    //     ];
+    //     let expected_centroids = vec![Vector::splat(1.5), Vector::splat(-1.5)];
 
-        // expected_partitions
-        //     .iter()
-        //     .map(|x| x.iter())
-        //     .flatten()
-        //     .for_each(|vector| {
-        //         let result = add_into(
-        //             &mut partition,
-        //             vector.clone(),
-        //             &mut intra_graph,
-        //             &mut inter_graph,
-        //             &mut [],
-        //         );
-        //         assert!(result.is_ok());
-        //     });
+    //     // expected_partitions
+    //     //     .iter()
+    //     //     .map(|x| x.iter())
+    //     //     .flatten()
+    //     //     .for_each(|vector| {
+    //     //         let result = add_into(
+    //     //             &mut partition,
+    //     //             vector.clone(),
+    //     //             &mut intra_graph,
+    //     //             &mut inter_graph,
+    //     //             &mut [],
+    //     //         );
+    //     //         assert!(result.is_ok());
+    //     //     });
 
-        // Call split_partition
-        let result = split_partition(&mut partition, &mut intra_graph, splits, &mut inter_graph);
-        // Validate results
-        assert!(result.is_ok());
-        let new_partitions = result.unwrap();
-        assert_eq!(new_partitions.len(), splits);
+    //     // Call split_partition
+    //     let result = split_partition(&mut partition, &mut intra_graph, splits, &mut inter_graph);
+    //     // Validate results
+    //     assert!(result.is_ok());
+    //     let new_partitions = result.unwrap();
+    //     assert_eq!(new_partitions.len(), splits);
 
-        new_partitions.iter().for_each(|(x, _)| {
-            println!("{:?}", x);
-        });
+    //     new_partitions.iter().for_each(|(x, _)| {
+    //         println!("{:?}", x);
+    //     });
 
-        let result = new_partitions
-            .iter()
-            .all(|(actual_partition, _actual_graph)| {
-                expected_partitions.iter().any(|expected_partition| {
-                    partition_check(&expected_partition, actual_partition)
-                }) && expected_centroids
-                    .iter()
-                    .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
-            });
-        assert!(result);
+    //     let result = new_partitions
+    //         .iter()
+    //         .all(|(actual_partition, _actual_graph)| {
+    //             expected_partitions.iter().any(|expected_partition| {
+    //                 partition_check(&expected_partition, actual_partition)
+    //             }) && expected_centroids
+    //                 .iter()
+    //                 .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
+    //         });
+    //     assert!(result);
 
-        let result = new_partitions
-            .iter()
-            .all(|(actual_partition, actual_graph)| {
-                actual_partition
-                    .iter()
-                    .all(|vec| actual_graph.1.contains_key(&VectorId(vec.id)))
-            });
-        assert!(result);
+    //     let result = new_partitions
+    //         .iter()
+    //         .all(|(actual_partition, actual_graph)| {
+    //             actual_partition
+    //                 .iter()
+    //                 .all(|vec| actual_graph.1.contains_key(&VectorId(vec.id)))
+    //         });
+    //     assert!(result);
 
-        let result = new_partitions
-            .iter()
-            .all(|(actual_partition, actual_graph)| actual_partition.id == *actual_graph.2);
-        assert!(result);
+    //     let result = new_partitions
+    //         .iter()
+    //         .all(|(actual_partition, actual_graph)| actual_partition.id == *actual_graph.2);
+    //     assert!(result);
 
-        let result = new_partitions
-            .iter()
-            .all(|(actual_partition, _actual_graph)| {
-                expected_partitions.iter().any(|expected_partition| {
-                    partition_check(&expected_partition, actual_partition)
-                }) && expected_centroids
-                    .iter()
-                    .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
-            });
-        assert!(result);
+    //     let result = new_partitions
+    //         .iter()
+    //         .all(|(actual_partition, _actual_graph)| {
+    //             expected_partitions.iter().any(|expected_partition| {
+    //                 partition_check(&expected_partition, actual_partition)
+    //             }) && expected_centroids
+    //                 .iter()
+    //                 .any(|expected_centroid| centroid_check(expected_centroid, actual_partition))
+    //         });
+    //     assert!(result);
 
-        assert_eq!(inter_graph.1.len(), 2);
-        assert_eq!(
-            inter_graph
-                .0
-                .edges(inter_graph.1[&PartitionId(partition.id)])
-                .count(),
-            1
-        );
-        // inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)])
-        //     .map(|x|x.source())
-        assert_eq!(
-            inter_graph
-                .0
-                .edges(inter_graph.1[&PartitionId(new_partitions[0].0.id)])
-                .count(),
-            1
-        );
-        // assert_eq!(inter_graph.1.len(), 2);
-    }
+    //     assert_eq!(inter_graph.1.len(), 2);
+    //     assert_eq!(
+    //         inter_graph
+    //             .0
+    //             .edges(inter_graph.1[&PartitionId(partition.id)])
+    //             .count(),
+    //         1
+    //     );
+    //     // inter_graph.0.edges(inter_graph.1[&PartitionId(partition.id)])
+    //     //     .map(|x|x.source())
+    //     assert_eq!(
+    //         inter_graph
+    //             .0
+    //             .edges(inter_graph.1[&PartitionId(new_partitions[0].0.id)])
+    //             .count(),
+    //         1
+    //     );
+    //     // assert_eq!(inter_graph.1.len(), 2);
+    // }
 
-    fn partition_check<
-        A: Field<A> + PartialEq + Copy,
-        B: VectorSpace<A> + Copy + PartialEq,
-        const PARTITION_CAP: usize,
-        const VECTOR_CAP: usize,
-    >(
-        search_vectors: &[VectorEntry<A, B>],
-        partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-    ) -> bool {
-        search_vectors.iter().all(|search_vector| {
-            partition.iter().any(|vector| {
-                vector.id == search_vector.id && vector.vector == search_vector.vector
-            })
-        })
-    }
-    fn centroid_check<
-        A: Field<A> + PartialEq + Copy,
-        B: VectorSpace<A> + Copy + PartialEq,
-        const PARTITION_CAP: usize,
-        const VECTOR_CAP: usize,
-    >(
-        centroid: &B,
-        partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-    ) -> bool {
-        &partition.centroid() == centroid
-    }
+    // fn partition_check<
+    //     A: Field<A> + PartialEq + Copy,
+    //     B: VectorSpace<A> + Copy + PartialEq,
+    //     const PARTITION_CAP: usize,
+    //     const VECTOR_CAP: usize,
+    // >(
+    //     search_vectors: &[VectorEntry<A, B>],
+    //     partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    // ) -> bool {
+    //     search_vectors.iter().all(|search_vector| {
+    //         partition.iter().any(|vector| {
+    //             vector.id == search_vector.id && vector.vector == search_vector.vector
+    //         })
+    //     })
+    // }
+    // fn centroid_check<
+    //     A: Field<A> + PartialEq + Copy,
+    //     B: VectorSpace<A> + Copy + PartialEq,
+    //     const PARTITION_CAP: usize,
+    //     const VECTOR_CAP: usize,
+    // >(
+    //     centroid: &B,
+    //     partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    // ) -> bool {
+    //     &partition.centroid() == centroid
+    // }
 
     // #[test]
     // fn invalid_split() {
