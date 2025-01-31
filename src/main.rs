@@ -22,7 +22,7 @@ fn main() {
     let db_thread = thread::Builder::new()
         .name("db_thread".to_string())
         .spawn(move || {
-            db_loop::<f32, Vector<f32, 2>, 4, 2, 10, DB_THREADS>(cmd_receiver);
+            db_loop::<f32, Vector<f32, 2>, 4, 2, 3, DB_THREADS>(cmd_receiver);
         });
 
     let rt = runtime::Builder::new_multi_thread()
