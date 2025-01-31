@@ -11,6 +11,8 @@ use crate::{
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
+pub mod knn;
+
 pub async fn stream_meta_data<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + Into<VectorSerial<A>>,
