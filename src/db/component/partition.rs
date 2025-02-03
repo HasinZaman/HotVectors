@@ -1,4 +1,4 @@
-use std::{array, marker::PhantomData, ops::Index, str::FromStr};
+use std::{array, hash::Hash, marker::PhantomData, ops::Index, str::FromStr};
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -328,6 +328,18 @@ impl<A: Field<A>, B: VectorSpace<A> + Sized> VectorEntry<A, B> {
             id: id,
             _phantom_data: PhantomData,
         }
+    }
+}
+
+impl<A: Field<A>, B: VectorSpace<A> + Sized> PartialEq for VectorEntry<A, B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl<A: Field<A>, B: VectorSpace<A> + Sized> Eq for VectorEntry<A, B> {}
+impl<A: Field<A>, B: VectorSpace<A> + Sized> Hash for VectorEntry<A, B> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
     }
 }
 

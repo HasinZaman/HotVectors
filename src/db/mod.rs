@@ -1,19 +1,21 @@
 use std::{
-    collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path, sync::Arc,
-    time::Duration,
+    cmp::min, collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path, sync::Arc, time::Duration
 };
 
 use crate::vector::VectorSerial;
 use component::{
     data_buffer::DataBuffer,
     graph::{GraphSerial, InterGraphSerial, InterPartitionGraph, IntraPartitionGraph},
-    ids::PartitionId,
+    ids::{PartitionId, VectorId},
     meta::Meta,
     partition::{Partition, PartitionSerial, VectorEntry},
     serial::FileExtension,
 };
 use log::State;
-use operations::{add::add, read::stream_meta_data};
+use operations::{
+    add::add,
+    read::{knn::{stream_exact_knn}, stream_meta_data},
+};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -70,6 +72,8 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
 
     // Filters
     Knn {
+        vector: B,
+        k: usize,
         transaction_id: Option<Uuid>,
     },
     SelectedUUID {
@@ -97,7 +101,8 @@ pub enum Response<A: Clone + Copy> {
 
 #[derive(Clone, Debug)]
 pub enum Success<A: Clone + Copy> {
-    MetaData(String, usize, VectorSerial<A>),
+    MetaData(PartitionId, usize, VectorSerial<A>),
+    Knn(VectorId, A),
 }
 
 pub fn dir_initialized(dir: &str) -> bool {
@@ -494,13 +499,30 @@ where
                             rt.spawn(async move {
                                 let _ = stream_meta_data(meta_data, &tx).await;
 
-                                let _ = tx.send(Response::Done);
+                                let _ = tx.send(Response::Done).await;
                             });
                         }
 
-                        AtomicCmd::Knn { transaction_id } => {
-                            // read all vectors and maybe a cache file
-                            todo!()
+                        AtomicCmd::Knn {
+                            vector,
+                            k,
+                            transaction_id,
+                        } => {
+                            // should replace with a way to choose knn method
+                            let meta_data = meta_data.clone();
+                            let inter_graph = inter_spanning_graph.clone();
+                            let partition_buffer = partition_buffer.clone();
+
+                            rt.spawn(async move {
+                                let Ok(_) =
+                                    stream_exact_knn(vector, k, inter_graph, partition_buffer, meta_data, &tx)
+                                        .await
+                                else {
+                                    todo!()
+                                };
+
+                                let _ = tx.send(Response::Done).await;
+                            });
                         }
                         AtomicCmd::SelectedUUID { transaction_id } => {
                             // create a cache of vectors in Uuid

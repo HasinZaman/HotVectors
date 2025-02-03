@@ -1,10 +1,7 @@
 use axum::{extract::State, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{array, fmt::Debug, sync::Arc};
-use tokio::sync::{
-    mpsc::{channel, Sender},
-    Mutex,
-};
+use tokio::sync::mpsc::{channel, Sender};
 
 use crate::{
     db::{AtomicCmd, Cmd, Response, Success},
@@ -146,9 +143,57 @@ where
         };
 
         data.push((
-            id,
+            (*id).to_string(),
             size,
             vector_serial.0.into_iter().map(|x| f32::from(x)).collect(),
+        ));
+    }
+
+    Json(format!("{:?}", data))
+}
+
+#[derive(Serialize, Deserialize)]
+struct KNNPayload<A> {
+    vector: Vec<A>,
+    k: usize,
+}
+async fn knn_route<
+    A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + 'static,
+    B: VectorSpace<A> + Sized + Send + Sync + 'static + TryFrom<Vec<f32>>,
+>(
+    State(state): State<Arc<AppState<A, B>>>,
+    Json(KNNPayload { vector, k }): Json<KNNPayload<f32>>,
+) -> Json<String>
+where
+    f32: From<A>,
+    <B as TryFrom<Vec<f32>>>::Error: Debug,
+{
+    println!("KNN REQUEST");
+
+    let (tx, mut rx) = channel(64);
+
+    let _ = state
+        .sender
+        .send((
+            Cmd::Atomic(AtomicCmd::Knn {
+                vector: B::try_from(vector).unwrap(),
+                k: k,
+                transaction_id: None,
+            }),
+            tx,
+        ))
+        .await;
+
+    let mut data: Vec<(String, A)> = Vec::new();
+
+    while let Some(Response::Success(knn_data)) = rx.recv().await {
+        let Success::Knn(vec_id, dist) = knn_data else {
+            panic!("")
+        };
+
+        data.push((
+            (*vec_id).to_string(),
+            dist,
         ));
     }
 
@@ -173,6 +218,7 @@ where
         .route("/insert", post(insert_vector_route::<A, B>))
         .route("/insert_batch", post(insert_batch_vector_route::<A, B>))
         .route("/metadata", post(metadata_route::<A, B>))
+        .route("/knn", post(knn_route::<A, B>))
         .with_state(shared_state);
 
     // Start the Axum server

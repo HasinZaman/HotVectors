@@ -7,7 +7,7 @@ use tokio::sync::{mpsc::Sender, RwLock};
 use uuid::Uuid;
 
 use crate::{
-    db::{component::meta::Meta, Response, Success},
+    db::{component::{ids::PartitionId, meta::Meta}, Response, Success},
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
@@ -38,7 +38,7 @@ pub async fn stream_meta_data<
 
             let _ = sender
                 .send(Response::Success(Success::MetaData(
-                    id.to_string(),
+                    PartitionId(*id),
                     data.size,
                     data.centroid.clone().into(),
                 )))
