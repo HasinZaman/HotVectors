@@ -234,8 +234,12 @@ pub fn split_partition<
 
         distances.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(Ordering::Equal));
 
+        // maybe try distance matrix to maximize distance between starting vectors
         for i1 in 0..distances.len() {
-            for i2 in i1..distances.len() {
+            for i2 in (i1 + 1)..distances.len() {
+                if i1 == i2 {
+                    panic!("End of list - attempted all possible solutions")
+                }
                 let mut prev_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
                     SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
                 let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
@@ -243,14 +247,14 @@ pub fn split_partition<
                     {
                         let mut tmp = PartitionSubSet::new(&target);
 
-                        tmp.add(distances[i1].0);
+                        tmp.add(distances[i1].0).unwrap();
 
                         tmp
                     },
                     {
                         let mut tmp = PartitionSubSet::new(&target);
 
-                        tmp.add(distances[i2].0);
+                        tmp.add(distances[i2].0).unwrap();
 
                         tmp
                     },
@@ -302,11 +306,14 @@ pub fn split_partition<
 
     let partition_membership: HashMap<VectorId, usize> = new_partitions
         .iter()
-        .map(|x| HashSet::<VectorId>::from(x))
         .enumerate()
-        .map(|(index, ids)| {
-            ids.iter()
-                .map(|id| (*id, index))
+        .map(|(idx, x)| {
+            x.vectors
+                .iter()
+                .take(x.size)
+                .map(|y| y.unwrap())
+                .map(|y| VectorId(target[y].id))
+                .map(|y| (y, idx))
                 .collect::<Vec<(VectorId, usize)>>()
         })
         .flatten()
@@ -317,68 +324,105 @@ pub fn split_partition<
             IntraPartitionGraph::new(PartitionId(x.id))
         });
         // (0..(splits)).map(|_| IntraPartitionGraph::new()).collect();
+        intra_graph
+            .1
+            .iter()
+            .map(|(vec_id, _)| vec_id)
+            .for_each(|vec_id| {
+                let index = partition_membership[vec_id];
+
+                intra_graphs[index].add_node(*vec_id);
+            });
 
         let mut new_inter_edges: Vec<((usize, VectorId), (usize, VectorId), A)> = Vec::new();
 
-        let mut inserted_edges = HashSet::new();
+        intra_graph
+            .0
+            .edge_indices()
+            .map(|edge_idx| {
+                (
+                    intra_graph.0.edge_endpoints(edge_idx).unwrap(),
+                    intra_graph.0.edge_weight(edge_idx).unwrap(),
+                )
+            })
+            .map(|((source, target), weight)| {
+                (
+                    intra_graph.0.node_weight(source).unwrap(),
+                    intra_graph.0.node_weight(target).unwrap(),
+                    weight,
+                )
+            })
+            .for_each(|(source, target, weight)| {
+                if partition_membership[source] == partition_membership[target] {
+                    let idx = partition_membership[source];
 
-        for partition in new_partitions.iter() {
-            partition
-                .vectors
-                .iter()
-                .take(partition.size)
-                .map(|vector| vector.unwrap())
-                .map(|vector_index| target[vector_index].id)
-                .for_each(|vector_id| {
-                    let edges: Vec<_> = intra_graph
-                        .0
-                        .edges(*intra_graph.1.get(&VectorId(vector_id)).expect(&format!(
-                            "Failed to extract {vector_id:?} from {intra_graph:#?}"
-                        )))
-                        .map(|edge| {
-                            (
-                                intra_graph.0.node_weight(edge.source()).unwrap(),
-                                intra_graph.0.node_weight(edge.target()).unwrap(),
-                                edge.weight(),
-                            )
-                        })
-                        .collect();
-                    if edges.len() == 0 {
-                        let id = VectorId(vector_id);
-                        let idx = partition_membership[&id];
+                    intra_graphs[idx].add_edge(*source, *target, *weight);
+                } else {
+                    new_inter_edges.push((
+                        (partition_membership[source], *source),
+                        (partition_membership[target], *target),
+                        *weight,
+                    ));
+                };
+            });
 
-                        if !intra_graphs[idx].1.contains_key(&id) {
-                            intra_graphs[idx].add_node(id);
-                        }
-                    } else {
-                        for (id_1, id_2, dist) in edges {
-                            if inserted_edges.contains(&(id_1, id_2)) {
-                                continue;
-                            }
-
-                            let idx_1 = partition_membership[id_1];
-                            let idx_2 = partition_membership[id_2];
-
-                            if !intra_graphs[idx_1].1.contains_key(id_1) {
-                                intra_graphs[idx_1].add_node(*id_1);
-                            }
-
-                            if !intra_graphs[idx_2].1.contains_key(id_2) {
-                                intra_graphs[idx_2].add_node(*id_2);
-                            }
-
-                            if idx_1 == idx_2 {
-                                intra_graphs[idx_1].add_edge(*id_1, *id_2, *dist);
-                            } else {
-                                new_inter_edges.push(((idx_1, *id_1), (idx_2, *id_2), *dist));
-                            }
-
-                            inserted_edges.insert((id_1, id_2));
-                            inserted_edges.insert((id_2, id_1));
-                        }
-                    }
-                });
-        }
+        // for partition in new_partitions.iter() {
+        //     partition
+        //         .vectors
+        //         .iter()
+        //         .take(partition.size)
+        //         .map(|vector| vector.unwrap())
+        //         .map(|vector_index| target[vector_index].id)
+        //         .for_each(|vector_id| {
+        //             let edges: Vec<_> = intra_graph
+        //                 .0
+        //                 .edges(*intra_graph.1.get(&VectorId(vector_id)).expect(&format!(
+        //                     "Failed to extract {vector_id:?} from {intra_graph:#?}"
+        //                 )))
+        //                 .map(|edge| {
+        //                     (
+        //                         intra_graph.0.node_weight(edge.source()).unwrap(),
+        //                         intra_graph.0.node_weight(edge.target()).unwrap(),
+        //                         edge.weight(),
+        //                     )
+        //                 })
+        //                 .collect();
+        //             if edges.len() == 0 {
+        //                 let id = VectorId(vector_id);
+        //                 let idx = partition_membership[&id];
+        //
+        //                 if !intra_graphs[idx].1.contains_key(&id) {
+        //                     intra_graphs[idx].add_node(id);
+        //                 }
+        //             } else {
+        //                 for (id_1, id_2, dist) in edges {
+        //                     if inserted_edges.contains(&(id_1, id_2)) {
+        //                         continue;
+        //                     }
+        //
+        //                     let idx_1 = partition_membership[id_1];
+        //                     let idx_2 = partition_membership[id_2];
+        //
+        //                     if !intra_graphs[idx_1].1.contains_key(id_1) {
+        //                         intra_graphs[idx_1].add_node(*id_1);
+        //                     }
+        //
+        //                     if !intra_graphs[idx_2].1.contains_key(id_2) {
+        //                         intra_graphs[idx_2].add_node(*id_2);
+        //                     }
+        //
+        //                     if idx_1 == idx_2 {
+        //                         intra_graphs[idx_1].add_edge(*id_1, *id_2, *dist);
+        //                     } else {
+        //                         new_inter_edges.push(((idx_1, *id_1), (idx_2, *id_2), *dist));
+        //                     }
+        //
+        //                     inserted_edges.insert((id_1, id_2));
+        //                     inserted_edges.insert((id_2, id_1));
+        //                 }
+        //             }
+        //         });
+        // }
 
         intra_graphs.iter().skip(1).for_each(|graph| {
             inter_graph.add_node(graph.2);
@@ -524,11 +568,238 @@ pub fn split_partition<
 
 #[cfg(test)]
 mod tests {
+    use std::{marker::PhantomData, str::FromStr};
+
     use uuid::Uuid;
 
     use super::*;
     use crate::{db::component::partition::VectorEntry, vector::Vector};
 
+    fn split_partition_test(
+        vectors: Vec<VectorEntry<f32, Vector<f32, 2>>>,
+        edges: Vec<(f32, Uuid, Uuid)>,
+    ) {
+        // Initialize a sample partition and graphs
+        let mut partition: Partition<f32, Vector<f32, 2>, 20, 10> = Partition::new();
+        partition.size = vectors.len();
+        vectors
+            .iter()
+            .enumerate()
+            .for_each(|(idx, vector)| partition.vectors[idx] = Some(vector.clone()));
+
+        let mut intra_graph = IntraPartitionGraph::<f32>::new(PartitionId(partition.id));
+
+        vectors.iter().map(|x| VectorId(x.id)).for_each(|id| {
+            intra_graph.add_node(id);
+        });
+        edges
+            .iter()
+            .map(|(weight, id_1, id_2)| (weight, VectorId(*id_1), VectorId(*id_2)))
+            .for_each(|(weight, id_1, id_2)| {
+                intra_graph.add_edge(id_1, id_2, *weight);
+            });
+        let mut inter_graph = InterPartitionGraph::<f32>::new();
+        inter_graph.add_node(intra_graph.2);
+
+        // Call the function under test
+        let result = split_partition(&mut partition, &mut intra_graph, &mut inter_graph);
+
+        // Check the result
+        match result {
+            Ok(splits) => {
+                // 1. Ensure no duplicate vectors across partitions
+                let mut all_vectors = vec![];
+                for (split_partition, _) in splits.iter() {
+                    all_vectors.extend(
+                        split_partition
+                            .vectors
+                            .iter()
+                            .take(split_partition.size)
+                            .map(|x| x.unwrap()),
+                    );
+                }
+                let unique_vectors: HashSet<_> = all_vectors.iter().collect();
+                assert_eq!(
+                    all_vectors.len(),
+                    unique_vectors.len(),
+                    "Duplicate vectors found across splits"
+                );
+
+                // 2. Ensure no duplicate vectors in the same split_partition
+                for (split_partition, _) in splits.iter() {
+                    let mut seen_vectors = HashSet::new();
+                    for vector in split_partition.vectors.iter().take(split_partition.size) {
+                        if let Some(vector) = vector {
+                            assert!(
+                                seen_vectors.insert(VectorId(vector.id)),
+                                "Duplicate vector found within a single partition"
+                            );
+                        }
+                    }
+                }
+
+                // 3. Ensure graph-partition consistency
+                for (split_partition, split_graph) in splits.iter() {
+                    let partition_vectors: HashSet<_> = split_partition
+                        .vectors
+                        .iter()
+                        .take(split_partition.size)
+                        .map(|x| x.unwrap())
+                        .map(|x| VectorId(x.id))
+                        .collect();
+                    let graph_vectors: HashSet<_> =
+                        split_graph.1.iter().map(|(id, _)| *id).collect();
+
+                    assert_eq!(
+                        partition_vectors, graph_vectors,
+                        "Mismatch between partition and graph vectors"
+                    );
+                }
+
+                // 4. Ensure no data loss: vectors in target should remain after splitting
+                let target_vectors: HashSet<_> = vectors.into_iter().collect();
+                let result_vectors: HashSet<_> = all_vectors.into_iter().collect();
+
+                assert_eq!(
+                    target_vectors, result_vectors,
+                    "Some vectors from the target were dropped after splitting"
+                );
+            }
+            Err(err) => {
+                panic!("split_partition failed with error: {:?}", err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_partition_correctness() {
+        let vectors: Vec<VectorEntry<f32, Vector<f32, 2>>> = vec![
+            VectorEntry {
+                vector: Vector([0.11623396, 0.12840234]),
+                id: Uuid::from_str("3ae497e1-744e-4630-b5fb-d668e61b8a99").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.05831603, 0.12463821]),
+                id: Uuid::from_str("ea413c57-d043-4979-8cdb-d042b48d32c1").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.091962166, 0.10388949]),
+                id: Uuid::from_str("11ac1bdf-fe20-4a92-a163-e00ac9ad88ee").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.058563404, 0.08736718]),
+                id: Uuid::from_str("8ad73200-1af9-48ad-a5ce-a25352326ac2").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.08708069, 0.121189125]),
+                id: Uuid::from_str("385c832b-155c-4a12-9ad7-45721097805d").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.08421735, 0.12917832]),
+                id: Uuid::from_str("a31b1590-7687-400a-8a51-6cbfedab298e").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10285964, 0.09018607]),
+                id: Uuid::from_str("732adbda-6fe1-431b-9ef9-a63a853463ef").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10480461, 0.10610912]),
+                id: Uuid::from_str("c6a10eeb-2d58-4e7b-8b3f-262a72455d44").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.092545256, 0.05741372]),
+                id: Uuid::from_str("be7cc8fc-25ce-4c30-8212-e4eb99b73ac5").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10123189, 0.09770964]),
+                id: Uuid::from_str("641098dc-0b36-4fd9-b016-c7836fa22289").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.084239475, 0.052746795]),
+                id: Uuid::from_str("d1249738-373e-4d71-977d-bcf7019828c6").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10068026, 0.10186246]),
+                id: Uuid::from_str("d108073c-8052-4e88-bca9-5704513621c0").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.099185295, 0.100453876]),
+                id: Uuid::from_str("2139155d-fc09-4964-ba3d-071fd79be71c").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.12748502, 0.124801084]),
+                id: Uuid::from_str("b217c232-f636-4464-baee-f6e4a980b67b").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.14168441, 0.07358162]),
+                id: Uuid::from_str("fbb18999-c858-41cf-919a-fa24d4c6db2e").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.13251953, 0.09862726]),
+                id: Uuid::from_str("fb5bb61d-0b49-4299-a92a-539daf754b43").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10723352, 0.08500998]),
+                id: Uuid::from_str("d122fe3b-85e1-4d1a-8d3c-52cec4dd2ab0").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.8811717, 0.05688962]),
+                id: Uuid::from_str("34bbf9b3-597f-4a39-bfc3-0988c4e01802").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.96600795, 0.1730615]),
+                id: Uuid::from_str("be48aa32-5611-4291-b768-5260bc47c4d6").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.94200873, 0.12781328]),
+                id: Uuid::from_str("43a57d74-e4d8-4ddf-895b-a5f9e11ff216").unwrap(),
+                _phantom_data: PhantomData,
+            },
+        ];
+        let edges = vec![
+            (
+                7.202588e-05,
+                Uuid::from_str("a31b1590-7687-400a-8a51-6cbfedab298e").unwrap(),
+                Uuid::from_str("385c832b-155c-4a12-9ad7-45721097805d").unwrap(),
+            ),
+            (
+                9.0766174e-05,
+                Uuid::from_str("d1249738-373e-4d71-977d-bcf7019828c6").unwrap(),
+                Uuid::from_str("be7cc8fc-25ce-4c30-8212-e4eb99b73ac5").unwrap(),
+            ),
+            (
+                0.00013955543,
+                Uuid::from_str("b217c232-f636-4464-baee-f6e4a980b67b").unwrap(),
+                Uuid::from_str("3ae497e1-744e-4630-b5fb-d668e61b8a99").unwrap(),
+            ),
+            (
+                0.002623364,
+                Uuid::from_str("43a57d74-e4d8-4ddf-895b-a5f9e11ff216").unwrap(),
+                Uuid::from_str("be48aa32-5611-4291-b768-5260bc47c4d6").unwrap(),
+            ),
+        ];
+
+        split_partition_test(vectors, edges);
+    }
     // #[test]
     // fn basic_split() {
     //     // Setup mock data
