@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use heapify::{make_heap_with, pop_heap_with};
 use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
 
 use tokio::sync::RwLock;
@@ -35,14 +36,51 @@ use crate::{
                 VectorEntrySerial,
             },
         },
-        operations::split::split_partition,
+        operations::split::{
+            calculate_number_of_trees, split_partition, split_partition_into_trees, KMean, BFS,
+        },
     },
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
 use super::InterPartitionGraph;
 
-fn find_closet_vector<
+// fn find_closet_vector<
+//     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
+//     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
+//     const PARTITION_CAP: usize,
+//     const VECTOR_CAP: usize,
+// >(
+//     vector: VectorEntry<A, B>,
+//     partitions: &[&Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
+
+//     dist_map: &mut HashMap<(PartitionId, VectorId), A>,
+// ) -> ((PartitionId, VectorId), A) {
+//     if cfg!(feature = "gpu_processing") {
+//         todo!()
+//     } else {
+//         partitions
+//             .iter()
+//             .map(|x| {
+//                 x.iter()
+//                     .map(|y| ((PartitionId(x.id), VectorId(y.id)), y.vector))
+//             })
+//             .flatten()
+//             .map(|(id, vec)| {
+//                 let dist = B::dist(&vector.vector, &vec);
+
+//                 dist_map.insert(id, dist);
+
+//                 (id, dist)
+//             })
+//             .min_by(|(id_1, dist_1), (id_2, dist_2)| {
+//                 dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+//             })
+//             .unwrap()
+//     }
+// }
+
+fn find_closet_vectors<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
@@ -52,31 +90,30 @@ fn find_closet_vector<
     partitions: &[&Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
 
     dist_map: &mut HashMap<(PartitionId, VectorId), A>,
-) -> ((PartitionId, VectorId), A) {
+) -> Vec<((PartitionId, VectorId), A)> {
     if cfg!(feature = "gpu_processing") {
         todo!()
     } else {
         partitions
             .iter()
-            .map(|x| {
-                x.iter()
-                    .map(|y| ((PartitionId(x.id), VectorId(y.id)), y.vector))
-            })
-            .flatten()
-            .map(|(id, vec)| {
-                let dist = B::dist(&vector.vector, &vec);
+            .map(|partition| {
+                partition
+                    .iter()
+                    .map(|y| ((PartitionId(partition.id), VectorId(y.id)), y.vector))
+                    .map(|(id, vec)| (id, B::dist(&vec, &vector.vector)))
+                    .map(|(id, dist)| {
+                        dist_map.insert(id, dist);
 
-                dist_map.insert(id, dist);
-
-                (id, dist)
+                        (id, dist)
+                    })
+                    .min_by(|(_, dist_1), (_, dist_2)| {
+                        (*dist_1).partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+                    })
+                    .unwrap()
             })
-            .min_by(|(id_1, dist_1), (id_2, dist_2)| {
-                dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
-            })
-            .unwrap()
+            .collect()
     }
 }
-
 fn add_into_partition<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
@@ -134,7 +171,7 @@ fn group_edges<A: PartialEq + Clone + Copy + Field<A>>(
     partition_map
 }
 
-fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd>(
+fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug>(
     vector_id: VectorId,
 
     partition_id: PartitionId,
@@ -162,12 +199,11 @@ where
     // check if new inter_graph to replace intra_edges
     let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
         .0
-        .edges(match min_spanning_graph.1.get(&target_vector_id) {
-            Some(val) => *val,
-            None => {
-                panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
-            }
-        })
+        .edges(
+            *min_spanning_graph.1.get(&target_vector_id).expect(&format!(
+                "Failed to extract {target_vector_id:?} from {min_spanning_graph:#?}"
+            )),
+        )
         .map(|edge| {
             (
                 edge.id(),
@@ -232,7 +268,7 @@ where
     Ok(replace_inter_edges)
 }
 
-fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd>(
+fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug>(
     source_id: PartitionId,
     vector_id: VectorId,
 
@@ -433,7 +469,46 @@ macro_rules! resolve_buffer {
             }
         }
     };
+    (PUSH, $buffer:expr, $value:expr) => {{
+        'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
+            let mut least_used = $buffer.least_used_iter().await.unwrap();
 
+            loop {
+                event!(Level::DEBUG, "Attempt get least used");
+                let Some(next_unload) = least_used.next() else {
+                    event!(Level::DEBUG, "Restarting least used iter");
+                    least_used = $buffer.least_used_iter().await.unwrap();
+                    continue;
+                };
+
+                event!(
+                    Level::DEBUG,
+                    "Filtering values any value that is equal to loaded values"
+                );
+                // if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                //     let unload_id = next_unload.1;
+                //     let loaded_ids = $loaded_ids;
+                //     event!(
+                //         Level::DEBUG,
+                //         "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                //     );
+                //     continue;
+                // }
+
+                event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
+                if let Err(err) = $buffer
+                    .unload_and_push(&next_unload.1, $value.clone())
+                    .await
+                {
+                    event!(Level::DEBUG, "Err({err:?})");
+                    continue;
+                };
+
+                event!(Level::DEBUG, "Break loop");
+                break 'primary_loop;
+            }
+        }
+    }};
     (PUSH, $buffer:expr, $value:expr, $loaded_ids:expr) => {{
         'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
             let mut least_used = $buffer.least_used_iter().await.unwrap();
@@ -491,7 +566,8 @@ pub async fn add<
                 >,
                 rancor::Error,
             >,
-        > + Debug,
+        > + Debug
+        + Extremes,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<A>> + Debug,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
@@ -561,7 +637,7 @@ where
 
             let dist = B::dist(centroid, &value.vector);
 
-            if closest.1 < dist {
+            if dist < closest.1 {
                 closet_size = *size;
 
                 closest = (*id, dist)
@@ -600,6 +676,7 @@ where
 
         meta.size = partition.size;
         meta.centroid = partition.centroid();
+        // meta.edge_length = (todo!(), todo!());
 
         return Ok(());
     }
@@ -631,7 +708,9 @@ where
         .chain(neighbor_ids.iter())
         .collect();
 
-    let mut closet_vector_id = {
+    let mut smallest_partition_edge_length: HashMap<PartitionId, A> = HashMap::new();
+
+    let closet_vector_id = {
         let partition_buffer = &mut *w_partition_buffer;
 
         event!(Level::DEBUG, "📦 Finding closet vector");
@@ -676,7 +755,23 @@ where
 
             if partitions.len() > 0 {
                 // possible future optimization to remove size of dist map
-                let (id, dist) = find_closet_vector(value, partitions.as_slice(), &mut dist_map);
+                // get closet_id & dist
+                // get get closet dist for each partition
+                let partition_distances =
+                    find_closet_vectors(value, partitions.as_slice(), &mut dist_map);
+
+                partition_distances
+                    .iter()
+                    .for_each(|((partition_id, _), dist)| {
+                        smallest_partition_edge_length.insert(*partition_id, *dist);
+                    });
+
+                let (id, dist) = partition_distances
+                    .into_iter()
+                    .min_by(|(_, dist_1), (_, dist_2)| {
+                        (*dist_1).partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+                    })
+                    .unwrap();
 
                 (closet_id, closet_dist) = match closet_id {
                     None => (Some(id), Some(dist)),
@@ -743,277 +838,621 @@ where
         closet_id.unwrap()
     };
 
+    // needs to be updated (Requires loading in more partitions in order to get distance of all nearby vectors)
+    // closet_partition_id = closet_vector_id.0;
+    event!(Level::INFO, "💎 closet_vector_id: {closet_vector_id:?}");
+
     // insert into partition
     {
         let partition_buffer = &mut *w_partition_buffer;
+        let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
+
+        event!(Level::DEBUG, "Insert partition size: {closet_size}");
+        if closet_size >= PARTITION_CAP {
+            let partition = resolve_buffer!(ACCESS, partition_buffer, closet_partition_id);
+
+            let Some(partition) = &mut *partition.try_write().unwrap() else {
+                todo!()
+            };
+
+            // split partition
+
+            let graph = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+            let Some(graph) = &mut *graph.try_write().unwrap() else {
+                todo!()
+            };
+
+            // split based on trees
+            let Ok(splits) = split_partition::<A, B, KMean, PARTITION_CAP, VECTOR_CAP>(
+                partition,
+                graph,
+                inter_graph,
+            ) else {
+                panic!()
+            };
+
+            let mut new_closet_id = (
+                splits[0].0.id,
+                B::dist(&splits[0].0.centroid(), &value.vector),
+            );
+            let mut push_pairs = Vec::new();
+
+            // can easily be unwrapped & gets rid of if statements
+            for (mut new_partition, mut new_graph) in splits {
+                // fix any forests
+                let pairs = match calculate_number_of_trees(&new_graph) > 1 {
+                    true => {
+                        event!(Level::DEBUG, "Fixing forest");
+                        split_partition_into_trees(&mut new_partition, &mut new_graph, inter_graph)
+                            .unwrap()
+                    }
+                    false => vec![(new_partition, new_graph)],
+                };
+
+                // if last value is closet_partition (then maybe skip that value and handle the edge case after the for loop)
+                for (new_partition, new_graph) in pairs {
+                    let dist = B::dist(&new_partition.centroid(), &value.vector);
+
+                    if dist < new_closet_id.1 {
+                        new_closet_id = (new_partition.id, dist);
+                    }
+
+                    if partition.id == new_partition.id {
+                        event!(Level::DEBUG, "Found original partition");
+                        *partition = new_partition;
+                        *graph = new_graph;
+
+                        let target_meta: &mut Meta<A, B> =
+                            &mut *meta_data[&partition.id].write().await;
+
+                            
+                        target_meta.size = partition.size;
+                        target_meta.centroid = partition.centroid();
+
+                        target_meta.edge_length = (
+                            graph.smallest_edge().unwrap().2,
+                            graph.largest_edge().unwrap().2,
+                        );
+                    } else {
+                        event!(Level::DEBUG, "Updating new partition");
+                        // update dist map
+                        new_partition
+                            .iter()
+                            .map(|vector| VectorId(vector.id))
+                            .for_each(|vector_id| {
+                                dist_map.insert(
+                                    (PartitionId(new_partition.id), vector_id),
+                                    *dist_map
+                                        .get(&(PartitionId(partition.id), vector_id))
+                                        .expect(&format!(
+                                            "Expect {:?} in {:?}",
+                                            (PartitionId(partition.id), vector_id),
+                                            dist_map
+                                        )),
+                                );
+                                dist_map.remove(&(PartitionId(partition.id), vector_id));
+                            });
+
+                        meta_data.insert(
+                            new_partition.id,
+                            Arc::new(RwLock::new(Meta::new(
+                                PartitionId(new_partition.id),
+                                new_partition.size,
+                                new_partition.centroid(),
+                                (
+                                    match new_graph.smallest_edge() {
+                                        Some(x) => x.2,
+                                        None => A::max(),
+                                    },
+                                    match new_graph.largest_edge() {
+                                        Some(x) => x.2,
+                                        None => A::min(),
+                                    },
+                                    // new_graph.smallest_edge().unwrap().2,
+                                    // new_graph.largest_edge().unwrap().2,
+                                ),
+                            ))),
+                        );
+
+                        push_pairs.push((new_partition, new_graph));
+                    }
+                }
+            }
+
+            // drop(partition);
+            let id = partition.id;
+            for (new_partition, new_graph) in push_pairs {
+                resolve_buffer!(PUSH, partition_buffer, new_partition, [id]);
+                resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [id]);
+            }
+
+            closet_partition_id = PartitionId(new_closet_id.0);
+        }
 
         let partition = resolve_buffer!(ACCESS, partition_buffer, closet_partition_id);
 
-        let Some(partition) = &mut *partition.write().await else {
+        let Some(partition) = &mut *partition.try_write().unwrap() else {
             todo!()
         };
 
-        if closet_size + 1 >= PARTITION_CAP {
-            // pre_mature split operation so don't have to do it after add_into_partition fails
-        }
+        let _ = add_into_partition(value.clone(), partition).unwrap();
 
-        let result = add_into_partition(value.clone(), partition);
+        let target_meta: &mut Meta<A, B> = &mut *meta_data[&partition.id].write().await;
 
-        'add_into_partition: {
-            event!(Level::DEBUG, "Add result: {result:?}");
-            if let Err(_) = result {
-                event!(Level::DEBUG, "Splitting partition");
-
-                let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
-
-                let min_span_tree =
-                    resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
-                let min_span_tree = &mut *min_span_tree.write().await;
-                let Some(min_span_tree) = min_span_tree else {
-                    todo!()
-                };
-
-                let Ok([new_split_2, new_split_1]) =
-                    split_partition(partition, min_span_tree, inter_graph)
-                else {
-                    panic!()
-                };
-                // let Ok(mut new_splits) = split_partition(partition, min_span_tree, 2, inter_graph)
-                // else {
-                //     panic!()
-                // };
-
-                // event!(Level::DEBUG, "New split size: {}", new_splits.len());
-
-                event!(Level::DEBUG, "OG graph: {min_span_tree:#?}");
-
-                {
-                    let (new_partition, new_graph) = new_split_1;
-
-                    *partition = new_partition;
-
-                    *min_span_tree = new_graph;
-                    event!(Level::DEBUG, "partition - 1: {partition:?}");
-                    event!(Level::DEBUG, "New graph - 1: {min_span_tree:#?}");
-                }
-
-                let (mut new_partition, new_graph) = new_split_2;
-                event!(Level::DEBUG, "partition - 2: {new_partition:?}");
-                event!(Level::DEBUG, "New graph - 2: {new_graph:#?}");
-                event!(Level::DEBUG, "inter: {inter_graph:#?}");
-
-                //add into partition or new_partition
-                new_partition
-                    .iter()
-                    .map(|vector| VectorId(vector.id))
-                    .for_each(|vector_id| {
-                        dist_map.insert(
-                            (PartitionId(new_partition.id), vector_id),
-                            *dist_map
-                                .get(&(PartitionId(partition.id), vector_id))
-                                .expect(&format!(
-                                    "Expect {:?} in {:?}",
-                                    (PartitionId(partition.id), vector_id),
-                                    dist_map
-                                )),
-                        );
-                        dist_map.remove(&(PartitionId(partition.id), vector_id));
-                    });
-
-                let dist_old = B::dist(&value.vector, &partition.centroid());
-                let dist_new = B::dist(&value.vector, &new_partition.centroid());
-
-                event!(Level::DEBUG, "closet_vector_id = {closet_vector_id:?}");
-                event!(
-                    Level::DEBUG,
-                    target_partition_id = %partition.id,
-                    target_partition_size = partition.size,
-                    new_partition_id = %new_partition.id,
-                    new_partition_size = new_partition.size,
-                    "Calculated distances for new and target partitions"
-                );
-                event!(Level::DEBUG, "{dist_old:?} < {dist_new:?}");
-
-                if closet_vector_id.0 == closet_partition_id
-                    && new_graph.1.contains_key(&closet_vector_id.1)
-                {
-                    let new_id = (PartitionId(new_partition.id), closet_vector_id.1);
-                    event!(
-                        Level::DEBUG,
-                        "closet_vector_id:{closet_vector_id:?}\tcloset_partition_id:{closet_partition_id:?}\tChanged closet id from = {closet_vector_id:?} -> {new_id:?}"
-                    );
-                    {
-                        let a = closet_partition_id;
-                        let b = PartitionId(new_partition.id);
-                        let c = closet_vector_id;
-                        let d = (PartitionId(new_partition.id), closet_vector_id.1);
-                        event!(
-                            Level::DEBUG,
-                            "Updating closet_partition_id = {a:?} -> {b:?}\tcloset_vector_id={c:?} -> {d:?}"
-                        );
-                    }
-                    closet_vector_id = new_id;
-                }
-
-                if dist_old < dist_new {
-                    add_into_partition(value, partition)
-                        .expect("Partition should now have space but an error occurred");
-                } else {
-                    add_into_partition(value, &mut new_partition)
-                        .expect("Partition should now have space but an error occurred");
-
-                    closet_partition_id = PartitionId(new_partition.id);
-                }
-
-                meta_data.insert(
-                    new_partition.id,
-                    Arc::new(RwLock::new(Meta::new(
-                        PartitionId(new_partition.id),
-                        new_partition.size,
-                        new_partition.centroid(),
-                    ))),
-                );
-
-                resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
-                resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [*min_span_tree.2]);
-            };
-        }
-
-        // update original partition
-        {
-            let target_meta = &mut *meta_data[&partition.id].write().await;
-
-            target_meta.size = partition.size;
-            target_meta.centroid = partition.centroid();
-        }
+        target_meta.size = partition.size;
+        target_meta.centroid = partition.centroid();
     }
 
     //update min_spanning
-    {
-        let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
+    'update_min_span: {
+        // filter out partitions where there is no overlap partition_max < vector_min
+        let mut candidate_ids = HashSet::new();
+        let neighbor_ids: Vec<PartitionId> = inter_graph
+            .0
+            .edges(inter_graph.1[&closet_partition_id])
+            .map(|edge| edge.weight())
+            .map(|edge| (edge.1 .0, edge.2 .0))
+            .map(
+                |(partition_id_1, partition_id_2)| match partition_id_1 == closet_partition_id {
+                    true => partition_id_2,
+                    false => partition_id_1,
+                },
+            )
+            // .flatten()
+            .collect::<HashSet<PartitionId>>()
+            .drain()
+            // .filter()
+            .collect();
 
-        let min_span_tree = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_vector_id.0);
-        let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-            todo!();
-        };
+        println!("{neighbor_ids:#?}");
 
-        let update_inter_graph_edges = match closet_vector_id.0 == closet_partition_id {
-            true => {
-                event!(Level::DEBUG, "update_local_min_span_tree");
-                update_local_min_span_tree(
-                    VectorId(value.id),
-                    closet_vector_id.0,
-                    closet_vector_id.1,
-                    &inter_graph,
-                    min_span_tree,
-                    // filter and collection operation is unnecessary
-                    dist_map
-                        .iter()
-                        .filter(|((partition_id, vector_id), _dist)| {
-                            partition_id == &closet_vector_id.0
-                        })
-                        .map(|((partition_id, vector_id), dist)| (*vector_id, *dist))
-                        .collect(),
-                )
-            }
-            false => {
-                event!(Level::DEBUG, "update_foreign_min_span_tree");
-                {
-                    let min_span_tree = resolve_buffer!(
-                        ACCESS,
-                        min_span_tree_buffer,
-                        closet_partition_id,
-                        [*closet_vector_id.0]
-                    );
-                    let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                        todo!();
-                    };
+        for id in neighbor_ids {
+            let data = meta_data[&id].read().await;
+            // if smallest_partition_edge_length[&id] <= data.edge_length.1 {
+            //     continue;
+            // }
 
-                    min_span_tree.add_node(VectorId(value.id));
-                }
-
-                update_foreign_min_span_tree(
-                    closet_partition_id,
-                    VectorId(value.id),
-                    closet_vector_id.0,
-                    closet_vector_id.1,
-                    inter_graph,
-                    min_span_tree,
-                    // filter and collection operation is unnecessary
-                    dist_map
-                        .iter()
-                        .filter(|((partition_id, vector_id), _dist)| {
-                            partition_id == &closet_vector_id.0
-                        })
-                        .map(|((partition_id, vector_id), dist)| (*vector_id, *dist))
-                        .collect(),
-                )
-            }
+            candidate_ids.insert(id);
         }
-        .unwrap();
 
-        // update_inter_graph.iter()
-        //     .filter(|(dist, _, _)| )
+        // vector_id -> partition_id
+        println!("{dist_map:#?}");
+        let vec_to_partition: HashMap<VectorId, PartitionId> = dist_map
+            .iter()
+            .map(|((partition_id, vector_id), _)| (*vector_id, *partition_id))
+            // .filter(|(_, id)| candidate_ids.contains(id) || *id == closet_partition_id)
+            .chain([(VectorId(value.id), closet_partition_id)])
+            .collect();
+        let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
+        for (vector_id, partition_id) in &vec_to_partition {
+            partition_to_vectors
+                .entry(*partition_id)
+                .or_insert_with(HashSet::new)
+                .insert(*vector_id);
+        }
+        // vector_id -> dist
+        let dist_map: HashMap<VectorId, A> = dist_map
+            .iter()
+            .map(|((_, vector_id), dist)| (*vector_id, *dist))
+            .collect();
 
-        // Vec<(A, (PartitionId, VectorId), (PartitionId, VectorId))>
+        // list of ids in graph
+        // get list of all edges and sort by distance (can be chunks)
+        let mut edges = {
+            let mut edges = Vec::new();
+            let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-        {
-            let partition_buffer = &mut *w_partition_buffer;
-
-            let mut edges_partitions = group_edges(update_inter_graph_edges);
-            loop {
-                let mut remove_key = Vec::new();
-                edges_partitions.iter().for_each(|(partition, edges)| {
-                    if !dist_map.contains_key(&edges[0].3) {
-                        return;
-                    }
-
-                    edges
-                        .iter()
-                        .filter(|(_, dist, _, id)| dist < &dist_map[id])
-                        .for_each(|(idx, _, _, id_2)| {
-                            inter_graph.add_edge(
-                                id_2.0,
-                                closet_vector_id.0,
-                                (dist_map[id_2], *id_2, closet_vector_id),
-                            );
-
-                            inter_graph.0.remove_edge(*idx);
-                        });
-
-                    remove_key.push(*partition);
+            // add inter_edge
+            inter_graph
+                .0
+                .edges(inter_graph.1[&closet_partition_id])
+                .map(|edge| (edge.weight()))
+                .map(|(dist, source, target)| (source.1, target.1, dist))
+                .for_each(|(source, target, dist)| {
+                    edges.push((source, target, *dist));
                 });
 
-                remove_key.into_iter().for_each(|key| {
-                    edges_partitions.remove_entry(&key);
-                });
+            // add local
+            {
+                let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
+                    resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
 
-                if edges_partitions.len() <= 0 {
-                    break;
-                }
-
-                event!(Level::DEBUG, "remaining keys: {edges_partitions:?}");
-
-                let partition_id = edges_partitions.iter().map(|(key, _)| *key).next().unwrap();
-
-                event!(Level::DEBUG, "Load: {partition_id:?}");
-
-                let partition = resolve_buffer!(ACCESS, partition_buffer, partition_id);
-                event!(Level::DEBUG, "Just resolved buffer");
-
-                let Some(partition) = &*partition.read().await else {
+                let Some(min_span_tree) = &*min_span_tree.read().await else {
                     todo!()
                 };
 
-                partition
-                    .iter()
-                    .map(|y| ((PartitionId(partition.id), VectorId(y.id)), y.vector))
-                    .for_each(|(id, vec)| {
-                        let dist = B::dist(&value.vector, &vec);
-
-                        dist_map.insert(id, dist);
+                min_span_tree
+                    .0
+                    .edge_indices()
+                    .map(|idx| {
+                        (
+                            min_span_tree.0.edge_endpoints(idx).unwrap(),
+                            min_span_tree.0.edge_weight(idx).unwrap(),
+                        )
+                    })
+                    .map(|((source, target), dist)| {
+                        (
+                            min_span_tree.0.node_weight(source).unwrap(),
+                            min_span_tree.0.node_weight(target).unwrap(),
+                            dist,
+                        )
+                    })
+                    .for_each(|(source, target, dist)| {
+                        edges.push((*source, *target, *dist));
                     });
             }
+
+            // candidate edges
+            dist_map
+                .iter()
+                .map(|(target, dist)| (VectorId(value.id), *target, *dist))
+                .filter(|(_, id, _)| vec_to_partition.get(id).is_some())
+                .filter(|(_, id, _)| {
+                    candidate_ids.contains(vec_to_partition.get(id).unwrap())
+                        || vec_to_partition.get(id).unwrap() == &closet_partition_id
+                })
+                .for_each(|(source, target, dist)| {
+                    edges.push((source, target, dist));
+                });
+
+            if edges.len() == 0 {
+                break 'update_min_span;
+            }
+
+            make_heap_with(&mut edges, |x, y| y.2.partial_cmp(&x.2));
+
+            edges
+        };
+
+        // if edges.len() == 0 {}
+
+        println!("{dist_map:#?}");
+        println!("{edges:#?}");
+        println!("{vec_to_partition:#?}");
+
+        // vec_to_partition
+
+        let mut sets: Vec<HashSet<VectorId>> = dist_map
+            .iter()
+            .map(|(key, _)| key)
+            .chain(&[VectorId(value.id)])
+            .map(|key| {
+                let mut set = HashSet::new();
+                set.insert(*key);
+
+                set
+            })
+            .collect();
+
+        let mut vec_to_set: HashMap<VectorId, usize> = dist_map
+            .iter()
+            .map(|(key, _)| key)
+            .chain(&[VectorId(value.id)])
+            .map(|id| *id)
+            .enumerate()
+            .map(|(idx, id)| (id, idx))
+            .collect();
+
+        // println!("PRE\n{sets:?}\t{vec_to_set:?}");
+
+        for (vector_id, partition_id) in &vec_to_partition {
+            if *partition_id != closet_partition_id {
+                let source_set_idx = *vec_to_set
+                    .get(vector_id)
+                    .expect("Vector not found in vec_to_set");
+
+                for (other_vector_id, other_partition_id) in &vec_to_partition {
+                    if other_partition_id == partition_id && other_vector_id != vector_id {
+                        let target_set_idx = *vec_to_set
+                            .get(other_vector_id)
+                            .expect("Vector not found in vec_to_set");
+
+                        if source_set_idx != target_set_idx {
+                            // Merge smaller set into the larger one
+                            let (smaller_idx, larger_idx) =
+                                if sets[source_set_idx].len() < sets[target_set_idx].len() {
+                                    (source_set_idx, target_set_idx)
+                                } else {
+                                    (target_set_idx, source_set_idx)
+                                };
+
+                            let tmp: Vec<VectorId> = sets[smaller_idx].drain().collect();
+                            for id in tmp {
+                                sets[larger_idx].insert(id);
+                                vec_to_set.insert(id, larger_idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // println!("POST\n{sets:?}\t{vec_to_set:?}");
+
+        let mut remove_edges = Vec::new();
+        let mut new_edges: Vec<(VectorId, VectorId, A)> = Vec::new();
+        let new_id = VectorId(value.id);
+        while edges.len() > 0 {
+            pop_heap_with(&mut edges, |x, y| y.2.partial_cmp(&x.2));
+
+            let (source, target, dist) = edges.pop().unwrap();
+
+            let same_tree = sets[*vec_to_set
+                .get(&source)
+                .expect(&format!("Failed to extract {source:?} from {vec_to_set:?}"))]
+            .contains(&target);
+
+            if same_tree {
+                remove_edges.push((source, target))
+            } else if target == new_id || source == new_id {
+                new_edges.push((source, target, dist));
+
+                // merge sets
+                let source_set_idx = *vec_to_set
+                    .get(&source)
+                    .expect("Source not found in vec_to_set");
+                let target_set_idx = *vec_to_set
+                    .get(&target)
+                    .expect("Target not found in vec_to_set");
+
+                if source_set_idx != target_set_idx {
+                    // Merge smaller set into the larger one for efficiency
+                    let (smaller_idx, larger_idx) =
+                        if sets[source_set_idx].len() < sets[target_set_idx].len() {
+                            (source_set_idx, target_set_idx)
+                        } else {
+                            (target_set_idx, source_set_idx)
+                        };
+
+                    let tmp: Vec<VectorId> = sets[smaller_idx].drain().collect();
+                    for id in tmp {
+                        sets[larger_idx].insert(id);
+                        vec_to_set.insert(id, larger_idx);
+                    }
+                }
+            } else {
+                // merge sets
+                let source_set_idx = *vec_to_set
+                    .get(&source)
+                    .expect(&format!("Failed to extract {source:?} from {vec_to_set:?}"));
+                let target_set_idx = *vec_to_set
+                    .get(&target)
+                    .expect(&format!("Failed to extract {source:?} from {vec_to_set:?}"));
+
+                if source_set_idx != target_set_idx {
+                    // Merge smaller set into the larger one for efficiency
+                    let (smaller_idx, larger_idx) =
+                        if sets[source_set_idx].len() < sets[target_set_idx].len() {
+                            (source_set_idx, target_set_idx)
+                        } else {
+                            (target_set_idx, source_set_idx)
+                        };
+
+                    let tmp: Vec<VectorId> = sets[smaller_idx].drain().collect();
+                    for id in tmp {
+                        sets[larger_idx].insert(id);
+                        vec_to_set.insert(id, larger_idx);
+                    }
+                }
+            }
+        }
+        {
+            let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
+
+            for (vec_id_1, vec_id_2) in remove_edges {
+                let partition_id_1 = vec_to_partition.get(&vec_id_1).expect(&format!(
+                    "Failed to extract {vec_id_1:?} from {vec_to_partition:?}"
+                ));
+                let partition_id_2 = vec_to_partition.get(&vec_id_2).expect(&format!(
+                    "Failed to extract {vec_id_2:?} from {vec_to_partition:?}"
+                ));
+
+                match partition_id_1 == partition_id_2 {
+                    true => {
+                        let rw_graph =
+                            resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id_1);
+
+                        let Some(graph) = &mut *rw_graph.try_write().unwrap() else {
+                            todo!()
+                        };
+
+                        let _ = graph.remove_edge(vec_id_1, vec_id_2);
+                    }
+                    false => {
+                        let _ = inter_graph
+                            .remove_edge((*partition_id_1, vec_id_1), (*partition_id_2, vec_id_2));
+                    }
+                }
+            }
+        }
+        {
+            new_edges
+                .iter()
+                .filter(|(id_1, id_2, _)| vec_to_partition.get(id_1) != vec_to_partition.get(id_2))
+                .filter(|(id_1, id_2, _)| {
+                    vec_to_partition.get(id_1).unwrap() == &closet_partition_id
+                        || vec_to_partition.get(id_2).unwrap() == &closet_partition_id
+                })
+                .map(|(id_1, id_2, dist)| {
+                    (
+                        *vec_to_partition.get(id_1).unwrap(),
+                        *vec_to_partition.get(id_2).unwrap(),
+                        (
+                            *dist,
+                            (*vec_to_partition.get(id_1).unwrap(), *id_1),
+                            (*vec_to_partition.get(id_2).unwrap(), *id_2),
+                        ),
+                    )
+                })
+                .for_each(|(id_1, id_2, dist)| {
+                    inter_graph.add_edge(id_1, id_2, dist);
+                });
+        }
+        'new_local: {
+            let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
+            let partition_buffer = &mut *w_partition_buffer;
+
+            // add new new vector to local graph
+            {
+                let rw_graph = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+
+                if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
+                    graph.add_node(VectorId(value.id));
+                };
+            }
+
+            let mut new_local: Vec<(VectorId, VectorId, A)> = new_edges
+                .iter()
+                .filter(|(id_1, id_2, _)| vec_to_partition.get(id_1) == vec_to_partition.get(id_2))
+                .map(|(id_1, id_2, dist)| (*id_1, *id_2, *dist))
+                .collect();
+
+            new_local.sort_by(|(x, ..), (y, ..)| {
+                vec_to_partition
+                    .get(x)
+                    .unwrap()
+                    .cmp(&vec_to_partition.get(y).unwrap())
+            });
+
+            let mut iter = new_local.into_iter();
+
+            let (mut current_partition_id, mut rw_graph) = {
+                let Some((id_1, id_2, dist)) = iter.next() else {
+                    break 'new_local;
+                };
+
+                let partition_id = vec_to_partition.get(&id_1).unwrap();
+                let rw_graph = resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id);
+
+                if let Some(graph) = &mut *rw_graph.write().await {
+                    graph.add_edge(id_1, id_2, dist);
+                };
+
+                (partition_id, rw_graph)
+            };
+
+            for (id_1, id_2, dist) in iter {
+                let partition_id = vec_to_partition.get(&id_1).unwrap();
+                if current_partition_id != partition_id {
+                    current_partition_id = partition_id;
+
+                    if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
+
+                        if calculate_number_of_trees(&graph) > 1 {
+                            let w_partition = resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
+                            let Some(partition) = &mut * w_partition.try_write().unwrap() else {
+                                todo!()
+                            };
+        
+                            let pairs = split_partition_into_trees(partition, graph, inter_graph).unwrap();
+                        
+                            for (new_partition, new_graph) in pairs {
+        
+                                if new_partition.id == partition.id {
+                                    *partition = new_partition;
+                                    *graph = new_graph;
+        
+                                    let target_meta: &mut Meta<A, B> =
+                                        &mut *meta_data[&partition.id].write().await;
+                
+                                            
+                                    target_meta.size = partition.size;
+                                    target_meta.centroid = partition.centroid();
+                
+                                    target_meta.edge_length = (
+                                        graph.smallest_edge().unwrap().2,
+                                        graph.largest_edge().unwrap().2,
+                                    );
+                                }
+                                else {
+                                    meta_data.insert(
+                                        new_partition.id,
+                                        Arc::new(RwLock::new(Meta::new(
+                                            PartitionId(new_partition.id),
+                                            new_partition.size,
+                                            new_partition.centroid(),
+                                            (
+                                                match new_graph.smallest_edge() {
+                                                    Some(x) => x.2,
+                                                    None => A::max(),
+                                                },
+                                                match new_graph.largest_edge() {
+                                                    Some(x) => x.2,
+                                                    None => A::min(),
+                                                },
+                                            ),
+                                        ))),
+                                    );
+            
+                                    resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
+                                    resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [partition.id]);
+                                }
+                            }
+                        };
+                    };
+
+                    rw_graph = resolve_buffer!(ACCESS, min_span_tree_buffer, *current_partition_id);
+                }
+
+                // already in the buffer and shouldn't need to wait
+                if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
+                    graph.add_edge(id_1, id_2, dist);
+                };
+            }
+
+            if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
+
+                if calculate_number_of_trees(&graph) > 1 {
+                    let w_partition = resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
+                    let Some(partition) = &mut * w_partition.try_write().unwrap() else {
+                        todo!()
+                    };
+
+                    let pairs = split_partition_into_trees(partition, graph, inter_graph).unwrap();
+                
+                    for (new_partition, new_graph) in pairs {
+
+                        if new_partition.id == partition.id {
+                            *partition = new_partition;
+                            *graph = new_graph;
+
+                            let target_meta: &mut Meta<A, B> =
+                                &mut *meta_data[&partition.id].write().await;
+        
+                                    
+                            target_meta.size = partition.size;
+                            target_meta.centroid = partition.centroid();
+        
+                            target_meta.edge_length = (
+                                graph.smallest_edge().unwrap().2,
+                                graph.largest_edge().unwrap().2,
+                            );
+                        }
+                        else {
+                            meta_data.insert(
+                                new_partition.id,
+                                Arc::new(RwLock::new(Meta::new(
+                                    PartitionId(new_partition.id),
+                                    new_partition.size,
+                                    new_partition.centroid(),
+                                    (
+                                        match new_graph.smallest_edge() {
+                                            Some(x) => x.2,
+                                            None => A::max(),
+                                        },
+                                        match new_graph.largest_edge() {
+                                            Some(x) => x.2,
+                                            None => A::min(),
+                                        },
+                                    ),
+                                ))),
+                            );
+    
+                            resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
+                            resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [partition.id]);
+                        }
+                    }
+                };
+            };
         }
     }
 

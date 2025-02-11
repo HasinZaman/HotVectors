@@ -1,5 +1,6 @@
 use std::{
-    cmp::min, collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path, sync::Arc, time::Duration
+    cmp::min, collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path,
+    sync::Arc, time::Duration,
 };
 
 use crate::vector::VectorSerial;
@@ -14,7 +15,10 @@ use component::{
 use log::State;
 use operations::{
     add::add,
-    read::{knn::{stream_exact_knn}, stream_meta_data},
+    read::{
+        knn::stream_exact_knn, stream_inter_graph, stream_meta_data, stream_partition_graph,
+        stream_vectors_from_partition,
+    },
 };
 use rancor::Strategy;
 use rkyv::{
@@ -69,12 +73,24 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
     GetMetaData {
         transaction_id: Option<Uuid>,
     },
+    // Graphs
+    GetPartitionGraph {
+        transaction_id: Option<Uuid>,
+        partition_id: PartitionId,
+    },
+    GetInterPartitionGraph {
+        transaction_id: Option<Uuid>,
+        partition_id: PartitionId,
+    },
 
     // Filters
     Knn {
         vector: B,
         k: usize,
         transaction_id: Option<Uuid>,
+    },
+    Partitions {
+        ids: Vec<PartitionId>,
     },
     SelectedUUID {
         transaction_id: Option<Uuid>,
@@ -103,6 +119,10 @@ pub enum Response<A: Clone + Copy> {
 pub enum Success<A: Clone + Copy> {
     MetaData(PartitionId, usize, VectorSerial<A>),
     Knn(VectorId, A),
+    Partition(PartitionId),
+    Vector(VectorId, VectorSerial<A>),
+    Edge(VectorId, VectorId, A),
+    InterEdge((PartitionId, VectorId), (PartitionId, VectorId), A),
 }
 
 pub fn dir_initialized(dir: &str) -> bool {
@@ -157,6 +177,7 @@ pub fn db_loop<
         + PartialOrd
         + Clone
         + Copy
+        + Extremes
         // + Ord
         + Field<A>
         + Send
@@ -286,6 +307,7 @@ where
                             PartitionId(id),
                             0,
                             B::additive_identity(),
+                            (A::max(), A::min()),
                         ))),
                     );
 
@@ -503,6 +525,42 @@ where
                             });
                         }
 
+                        AtomicCmd::GetPartitionGraph {
+                            transaction_id,
+                            partition_id,
+                        } => {
+                            let meta_data = meta_data.clone();
+                            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+
+                            rt.spawn(async move {
+                                let _ = stream_partition_graph(
+                                    partition_id,
+                                    meta_data,
+                                    min_spanning_tree_buffer,
+                                    &tx,
+                                )
+                                .await;
+
+                                let _ = tx.send(Response::Done).await;
+                            });
+                        }
+                        AtomicCmd::GetInterPartitionGraph {
+                            transaction_id,
+                            partition_id,
+                        } => {
+                            let meta_data = meta_data.clone();
+                            let inter_graph = inter_spanning_graph.clone();
+
+                            rt.spawn(async move {
+                                let _ =
+                                    stream_inter_graph(partition_id, meta_data, inter_graph, &tx)
+                                        .await;
+
+                                let _ = tx.send(Response::Done).await;
+                            });
+                        }
+
+                        // stream_inter_graph
                         AtomicCmd::Knn {
                             vector,
                             k,
@@ -514,9 +572,36 @@ where
                             let partition_buffer = partition_buffer.clone();
 
                             rt.spawn(async move {
-                                let Ok(_) =
-                                    stream_exact_knn(vector, k, inter_graph, partition_buffer, meta_data, &tx)
-                                        .await
+                                let Ok(_) = stream_exact_knn(
+                                    vector,
+                                    k,
+                                    inter_graph,
+                                    partition_buffer,
+                                    meta_data,
+                                    &tx,
+                                )
+                                .await
+                                else {
+                                    todo!()
+                                };
+
+                                let _ = tx.send(Response::Done).await;
+                            });
+                        }
+
+                        AtomicCmd::Partitions { ids } => {
+                            // should replace with a way to choose knn method
+                            let meta_data = meta_data.clone();
+                            let partition_buffer = partition_buffer.clone();
+
+                            rt.spawn(async move {
+                                let Ok(_) = stream_vectors_from_partition(
+                                    ids,
+                                    meta_data,
+                                    partition_buffer,
+                                    &tx,
+                                )
+                                .await
                                 else {
                                     todo!()
                                 };

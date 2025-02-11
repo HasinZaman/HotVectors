@@ -1,6 +1,6 @@
 use std::{array, fmt::Debug};
 
-use rkyv::{seal::Seal, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 pub trait Extremes {
     fn min() -> Self;
@@ -123,6 +123,20 @@ macro_rules! extremes_int {
                 Vector(array::from_fn(|_| iter.next().unwrap()))
             }
         }
+        impl Extremes for $head {
+            fn min() -> Self {
+                $head::MIN
+            }
+            fn max() -> Self {
+                $head::MAX
+            }
+            fn additive_identity() -> Self {
+                0
+            }
+            fn multiplicative_identity() -> Self {
+                1
+            }
+        }
         impl Field<$head> for $head {
             fn add(lhs: &Self, rhs: &Self) -> Self {
                 lhs + rhs
@@ -160,6 +174,20 @@ macro_rules! extremes_float {
         extremes_float![$($tail),+];
     };
     [$head: tt] => {
+        impl Extremes for $head {
+            fn min() -> Self {
+                $head::MIN
+            }
+            fn max() -> Self {
+                $head::MAX
+            }
+            fn additive_identity() -> Self {
+                0.
+            }
+            fn multiplicative_identity() -> Self {
+                1.
+            }
+        }
         impl<const CAP: usize> Extremes for Vector<$head, CAP> {
             fn min() -> Self {
                 let mut iter = (0..CAP)

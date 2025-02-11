@@ -12,16 +12,19 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use crate::{
-    db::{component::{
-        data_buffer::{BufferError, DataBuffer},
-        graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
-        ids::{PartitionId, VectorId},
-        meta::Meta,
-        partition::{
-            ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
-            VectorEntrySerial,
+    db::{
+        component::{
+            data_buffer::{BufferError, DataBuffer},
+            graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
+            ids::{PartitionId, VectorId},
+            meta::Meta,
+            partition::{
+                ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
+                VectorEntrySerial,
+            },
         },
-    }, Response, Success},
+        Response, Success,
+    },
     vector::{Field, Vector, VectorSerial, VectorSpace},
 };
 
@@ -334,7 +337,10 @@ where
     let r_meta_data_lock = meta_data.read().await;
     let r_inter_graph = inter_graph.read().await;
 
-    event!(Level::INFO, "🔓 Acquired read locks for metadata and inter_graph");
+    event!(
+        Level::INFO,
+        "🔓 Acquired read locks for metadata and inter_graph"
+    );
     // find nearest partition
 
     event!(Level::INFO, "✨ Finding closest partition");
@@ -377,7 +383,12 @@ where
         (closet_partition, total_size)
     };
 
-    event!(Level::INFO, "📍 Closest partition found: {:?}, Total size: {}", closet_partition, total_size);
+    event!(
+        Level::INFO,
+        "📍 Closest partition found: {:?}, Total size: {}",
+        closet_partition,
+        total_size
+    );
 
     if total_size <= k {
         // just get all vectors (don't need to check inter_graphs)
@@ -393,9 +404,14 @@ where
 
     let mut checked_partitions: HashSet<PartitionId> = HashSet::new();
 
-    while (search_queue.len() > 0 || cloud_vectors.len() > 0) && core_vector_size <= k{
-        event!(Level::INFO, "🔄 Search queue length: {}, Core vector count: {}", search_queue.len(), core_vector_size);
-        
+    while (search_queue.len() > 0 || cloud_vectors.len() > 0) && core_vector_size <= k {
+        event!(
+            Level::INFO,
+            "🔄 Search queue length: {}, Core vector count: {}",
+            search_queue.len(),
+            core_vector_size
+        );
+
         loop {
             let mut remove_index = vec![];
 
@@ -411,7 +427,6 @@ where
                     let r_partition = rwl_partition.read().await;
 
                     let Some(partition) = &*r_partition else {
-
                         event!(Level::ERROR, "🚫 Partition not found");
                         todo!()
                     };
@@ -491,7 +506,6 @@ where
             }
         }
 
-        
         make_heap_with(&mut cloud_vectors, |(_, _, dist_1), (_, _, dist_2)| {
             dist_1.partial_cmp(dist_2)
         });
@@ -501,21 +515,26 @@ where
         });
         // push values into core_vectors
         while let Some((partition_id, vector_id, Reverse(dist))) = cloud_vectors.pop() {
-            match (core_partitions.contains(&partition_id), k <= core_vector_size) {
-                (_, true) => {
-                    return Ok(())
-                }
+            match (
+                core_partitions.contains(&partition_id),
+                k <= core_vector_size,
+            ) {
+                (_, true) => return Ok(()),
                 (true, false) => {
                     event!(Level::INFO, "Add Vector: {:?}", (vector_id, dist));
-                    let _ = sender.send(Response::Success(Success::Knn(vector_id, dist))).await;
-                    core_vector_size+=1;
+                    let _ = sender
+                        .send(Response::Success(Success::Knn(vector_id, dist)))
+                        .await;
+                    core_vector_size += 1;
                     // core_vectors.push((vector_id, dist));
                 }
                 (false, false) => {
                     event!(Level::INFO, "Add Vector: {:?}", (vector_id, dist));
-        
-                    let _ = sender.send(Response::Success(Success::Knn(vector_id, dist))).await;
-                    core_vector_size+=1;
+
+                    let _ = sender
+                        .send(Response::Success(Success::Knn(vector_id, dist)))
+                        .await;
+                    core_vector_size += 1;
 
                     core_partitions.insert(partition_id);
 
@@ -547,7 +566,6 @@ where
         }
     }
     event!(Level::INFO, "Core vector count: {}", core_vector_size);
-        
 
     return Ok(());
 }

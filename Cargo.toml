@@ -22,5 +22,7 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3.19"
 
+# async_sqlite = "*"
+
 # Conditional dependency for REST API
 axum = { version = "0.8.1", features = ["macros"]}#, optional = true}

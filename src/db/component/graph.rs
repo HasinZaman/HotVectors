@@ -1,6 +1,8 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{cmp::Ordering, collections::HashMap, fmt::Debug, str::FromStr};
 
-use petgraph::{csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, Undirected};
+use petgraph::{
+    csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, visit::EdgeRef, Undirected,
+};
 use rancor::Strategy;
 use uuid::Uuid;
 
@@ -124,6 +126,12 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
         idx
     }
 
+    pub fn remove_node(&mut self, node: PartitionId) {
+        if let Some(idx) = self.1.remove(&node) {
+            self.0.remove_node(idx);
+        }
+    }
+
     pub fn add_edge(
         &mut self,
         node_1: PartitionId,
@@ -134,16 +142,43 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
         let idx_2 = self.1[&node_2];
         self.0.add_edge(idx_1, idx_2, weight);
     }
+
+    pub fn remove_edge(
+        &mut self,
+        node_1: (PartitionId, VectorId),
+        node_2: (PartitionId, VectorId),
+    ) -> Result<(), ()> {
+        let Some((_, edge_idx)) = self
+            .0
+            .edges(
+                *self
+                    .1
+                    .get(&node_1.0)
+                    .unwrap_or_else(|| self.1.get(&node_2.0).unwrap()),
+            )
+            .map(|edge_ref| (edge_ref.weight(), edge_ref.id()))
+            .filter(|((_, id_1, id_2), _)| {
+                (id_1 == &node_1 && id_2 == &node_2) || (id_2 == &node_1 && id_1 == &node_2)
+            })
+            .next()
+        else {
+            return Err(());
+        };
+
+        self.0.remove_edge(edge_idx);
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct IntraPartitionGraph<A: Field<A>>(
+pub struct IntraPartitionGraph<A: Field<A> + Debug>(
     pub StableGraph<VectorId, A, Undirected, DefaultIx>,
     pub HashMap<VectorId, NodeIndex<DefaultIx>>,
     pub PartitionId,
 );
 
-impl<A: Field<A> + Clone + Copy> IntraPartitionGraph<A> {
+impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
     pub fn new(id: PartitionId) -> Self {
         Self(StableGraph::default(), HashMap::new(), id)
     }
@@ -169,13 +204,96 @@ impl<A: Field<A> + Clone + Copy> IntraPartitionGraph<A> {
     }
 
     pub fn add_edge(&mut self, node_1: VectorId, node_2: VectorId, weight: A) {
-        let idx_1 = self.1[&node_1];
-        let idx_2 = self.1[&node_2];
+        let idx_1 = *self
+            .1
+            .get(&node_1)
+            .expect(&format!("Failed to extract {node_1:?} from {self:#?}"));
+        let idx_2 = *self
+            .1
+            .get(&node_2)
+            .expect(&format!("Failed to extract {node_2:?} from {self:#?}"));
         self.0.add_edge(idx_1, idx_2, weight);
+    }
+
+    pub fn remove_edge(&mut self, node_1: VectorId, node_2: VectorId) -> Result<(), ()> {
+        let Some((_, _, edge_idx)) = self
+            .0
+            .edges(
+                *self
+                    .1
+                    .get(&node_1)
+                    .unwrap_or_else(|| self.1.get(&node_2).unwrap()),
+            ) // should return error
+            .map(|edge_ref| ((edge_ref.source(), edge_ref.target()), edge_ref.id()))
+            .map(|((source, target), e_idx)| {
+                (
+                    *self.0.node_weight(source).unwrap(),
+                    *self.0.node_weight(target).unwrap(),
+                    e_idx,
+                )
+            })
+            .filter(|(id_1, id_2, _)| {
+                (id_1 == &node_1 && id_2 == &node_2) || (id_2 == &node_1 && id_1 == &node_2)
+            })
+            .next()
+        else {
+            return Err(());
+        };
+
+        self.0.remove_edge(edge_idx);
+
+        Ok(())
+    }
+
+    pub fn smallest_edge(&self) -> Option<(VectorId, VectorId, A)>
+    where
+        A: PartialOrd,
+    {
+        self.0
+            .edge_indices()
+            .map(|e_idx| {
+                (
+                    self.0.edge_endpoints(e_idx).unwrap(),
+                    self.0.edge_weight(e_idx).unwrap(),
+                )
+            })
+            .map(|((source, target), dist)| {
+                (
+                    *self.0.node_weight(source).unwrap(),
+                    *self.0.node_weight(target).unwrap(),
+                    *dist,
+                )
+            })
+            .min_by(|(_, _, dist_1), (_, _, dist_2)| {
+                dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+            })
+    }
+    pub fn largest_edge(&self) -> Option<(VectorId, VectorId, A)>
+    where
+        A: PartialOrd,
+    {
+        self.0
+            .edge_indices()
+            .map(|e_idx| {
+                (
+                    self.0.edge_endpoints(e_idx).unwrap(),
+                    self.0.edge_weight(e_idx).unwrap(),
+                )
+            })
+            .map(|((source, target), dist)| {
+                (
+                    *self.0.node_weight(source).unwrap(),
+                    *self.0.node_weight(target).unwrap(),
+                    *dist,
+                )
+            })
+            .max_by(|(_, _, dist_1), (_, _, dist_2)| {
+                dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+            })
     }
 }
 
-impl<'a, A: Field<A>> Into<Uuid> for &'a IntraPartitionGraph<A> {
+impl<'a, A: Field<A> + Debug> Into<Uuid> for &'a IntraPartitionGraph<A> {
     fn into(self) -> Uuid {
         *self.2
     }
@@ -194,7 +312,7 @@ impl<A> FileExtension for GraphSerial<A> {
     }
 }
 
-impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for GraphSerial<A> {
+impl<A: Field<A> + Clone + Copy + Debug> From<IntraPartitionGraph<A>> for GraphSerial<A> {
     fn from(value: IntraPartitionGraph<A>) -> Self {
         let id_to_index_map: HashMap<VectorId, usize> = value
             .1
@@ -233,7 +351,7 @@ impl<A: Field<A> + Clone + Copy> From<IntraPartitionGraph<A>> for GraphSerial<A>
     }
 }
 
-impl<A: Field<A> + Clone + Copy> From<GraphSerial<A>> for IntraPartitionGraph<A> {
+impl<A: Field<A> + Clone + Copy + Debug> From<GraphSerial<A>> for IntraPartitionGraph<A> {
     fn from(value: GraphSerial<A>) -> Self {
         let mut graph: StableGraph<VectorId, A, Undirected> = StableGraph::default();
         let mut uuid_to_index = HashMap::new();

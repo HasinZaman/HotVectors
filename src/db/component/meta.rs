@@ -21,16 +21,16 @@ pub struct Meta<A: Field<A>, B: VectorSpace<A> + Clone> {
     pub size: usize,
     pub centroid: B,
 
-    pub _phantom_data: PhantomData<A>,
+    pub edge_length: (A, A),
 }
 
 impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + From<VectorSerial<A>>> Meta<A, B> {
-    pub fn new(id: PartitionId, size: usize, centroid: B) -> Self {
+    pub fn new(id: PartitionId, size: usize, centroid: B, edge_length: (A, A)) -> Self {
         Self {
             id,
             size,
             centroid,
-            _phantom_data: PhantomData,
+            edge_length,
         }
     }
 
@@ -41,6 +41,7 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + From<VectorSerial<A
         for<'a> <A as Archive>::Archived:
             CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
         [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+        <A as Archive>::Archived: rkyv::Deserialize<A, Strategy<Pool, rancor::Error>>,
     {
         let bytes = tokio::fs::read(&format!("{dir}//{name}.{}", MetaSerial::<A>::extension()))
             .await
@@ -101,6 +102,7 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + From<VectorSerial<A
         for<'a> <A as Archive>::Archived:
             CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
         [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+        <A as Archive>::Archived: rkyv::Deserialize<A, Strategy<Pool, rancor::Error>>,
     {
         let mut results = Vec::new();
         let mut entries = read_dir(dir).await.unwrap();
@@ -128,6 +130,8 @@ pub struct MetaSerial<A: Clone + Copy> {
     pub id: String,
     pub size: usize,
     pub centroid: VectorSerial<A>,
+
+    pub edge_length: (A, A),
 }
 
 impl<A: Clone + Copy> FileExtension for MetaSerial<A> {
@@ -144,7 +148,7 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + From<VectorSerial<A
             id: PartitionId(Uuid::from_str(&value.id).unwrap()),
             size: value.size,
             centroid: value.centroid.into(),
-            _phantom_data: PhantomData,
+            edge_length: value.edge_length,
         }
     }
 }
@@ -157,6 +161,8 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + Into<VectorSerial<A
             id: value.id.0.to_string(),
             size: value.size,
             centroid: value.centroid.into(),
+
+            edge_length: value.edge_length,
         }
     }
 }
@@ -169,6 +175,8 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + Into<VectorSerial<A
             id: value.id.0.to_string(),
             size: value.size,
             centroid: value.centroid.clone().into(),
+
+            edge_length: value.edge_length,
         }
     }
 }
