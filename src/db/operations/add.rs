@@ -910,8 +910,14 @@ where
                         target_meta.centroid = partition.centroid();
 
                         target_meta.edge_length = (
-                            graph.smallest_edge().unwrap().2,
-                            graph.largest_edge().unwrap().2,
+                            match graph.smallest_edge() {
+                                Some(x) => x.2,
+                                None => A::max(),
+                            },
+                            match graph.largest_edge() {
+                                Some(x) => x.2,
+                                None => A::min(),
+                            },
                         );
                     } else {
                         event!(Level::DEBUG, "Updating new partition");
@@ -1359,8 +1365,14 @@ where
                                     target_meta.centroid = partition.centroid();
                 
                                     target_meta.edge_length = (
-                                        graph.smallest_edge().unwrap().2,
-                                        graph.largest_edge().unwrap().2,
+                                        match graph.smallest_edge() {
+                                            Some(x) => x.2,
+                                            None => A::max(),
+                                        },
+                                        match graph.largest_edge() {
+                                            Some(x) => x.2,
+                                            None => A::min(),
+                                        },
                                     );
                                 }
                                 else {
@@ -1423,8 +1435,14 @@ where
                             target_meta.centroid = partition.centroid();
         
                             target_meta.edge_length = (
-                                graph.smallest_edge().unwrap().2,
-                                graph.largest_edge().unwrap().2,
+                                match graph.smallest_edge() {
+                                    Some(x) => x.2,
+                                    None => A::max(),
+                                },
+                                match graph.largest_edge() {
+                                    Some(x) => x.2,
+                                    None => A::min(),
+                                },
                             );
                         }
                         else {
