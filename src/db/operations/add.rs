@@ -9,7 +9,7 @@ use std::{
 use heapify::{make_heap_with, pop_heap_with};
 use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
 
-use tokio::sync::RwLock;
+use tokio::{runtime::Runtime, sync::{Mutex, RwLock}};
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -84,34 +84,38 @@ fn find_closet_vectors<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
-    const VECTOR_CAP: usize,
+    const VECTOR_CAP: usize
 >(
     vector: VectorEntry<A, B>,
     partitions: &[&Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
 
-    dist_map: &mut HashMap<(PartitionId, VectorId), A>,
-) -> Vec<((PartitionId, VectorId), A)> {
+    // dist_map: &mut HashMap<(PartitionId, VectorId), A>,
+) -> (Vec<((PartitionId, VectorId), A)>, HashMap<(PartitionId, VectorId), A>) {
     if cfg!(feature = "gpu_processing") {
         todo!()
     } else {
-        partitions
-            .iter()
-            .map(|partition| {
-                partition
-                    .iter()
-                    .map(|y| ((PartitionId(partition.id), VectorId(y.id)), y.vector))
-                    .map(|(id, vec)| (id, B::dist(&vec, &vector.vector)))
-                    .map(|(id, dist)| {
-                        dist_map.insert(id, dist);
+        let mut dist_map: HashMap<(PartitionId, VectorId), A> = HashMap::new();
+        (
+            partitions
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|y| ((PartitionId(partition.id), VectorId(y.id)), y.vector))
+                        .map(|(id, vec)| (id, B::dist(&vec, &vector.vector)))
+                        .map(|(id, dist)| {
+                            dist_map.insert(id, dist);
 
-                        (id, dist)
-                    })
-                    .min_by(|(_, dist_1), (_, dist_2)| {
-                        (*dist_1).partial_cmp(dist_2).unwrap_or(Ordering::Equal)
-                    })
-                    .unwrap()
-            })
-            .collect()
+                            (id, dist)
+                        })
+                        .min_by(|(_, dist_1), (_, dist_2)| {
+                            (*dist_1).partial_cmp(dist_2).unwrap_or(Ordering::Equal)
+                        })
+                        .unwrap()
+                })
+                .collect(),
+            dist_map
+        )
     }
 }
 fn add_into_partition<
@@ -614,7 +618,7 @@ where
     event!(Level::DEBUG, "🔒 Locked `inter_graph`");
 
     // find closet id
-    let (mut closet_partition_id, closet_size) = {
+    let (mut closet_partition_id, mut closet_size) = {
         event!(Level::INFO, "✨ Finding closest partition");
         let mut meta_data = meta_data.iter();
         let mut closet_size = 0;
@@ -720,6 +724,7 @@ where
         let mut closet_id = None;
         let mut closet_dist = None;
 
+        
         loop {
             let mut acquired_partitions = Vec::new();
             event!(
@@ -757,8 +762,11 @@ where
                 // possible future optimization to remove size of dist map
                 // get closet_id & dist
                 // get get closet dist for each partition
-                let partition_distances =
-                    find_closet_vectors(value, partitions.as_slice(), &mut dist_map);
+                let (partition_distances, new_dist_map) =
+                    find_closet_vectors(value, partitions.as_slice());
+
+                dist_map.extend(new_dist_map);
+
 
                 partition_distances
                     .iter()
@@ -839,7 +847,16 @@ where
     };
 
     // needs to be updated (Requires loading in more partitions in order to get distance of all nearby vectors)
-    // closet_partition_id = closet_vector_id.0;
+    closet_partition_id = closet_vector_id.0;
+    {
+        let data = meta_data.get(&closet_partition_id).expect(&format!("Expect {closet_partition_id:?} in meta_data"));
+
+        let Meta {
+            size, ..
+        } = &*data.try_read().unwrap();
+
+        closet_size = *size;
+    };
     event!(Level::INFO, "💎 closet_vector_id: {closet_vector_id:?}");
 
     // insert into partition
@@ -992,8 +1009,8 @@ where
     //update min_spanning
     'update_min_span: {
         // filter out partitions where there is no overlap partition_max < vector_min
-        let mut candidate_ids = HashSet::new();
-        let neighbor_ids: Vec<PartitionId> = inter_graph
+        // let mut neighbor_ids = HashSet::new();
+        let neighbor_ids: HashSet<PartitionId> = inter_graph
             .0
             .edges(inter_graph.1[&closet_partition_id])
             .map(|edge| edge.weight())
@@ -1012,35 +1029,154 @@ where
 
         println!("{neighbor_ids:#?}");
 
-        for id in neighbor_ids {
-            let data = meta_data[&id].read().await;
-            // if smallest_partition_edge_length[&id] <= data.edge_length.1 {
-            //     continue;
-            // }
-
-            candidate_ids.insert(id);
-        }
-
         // vector_id -> partition_id
         println!("{dist_map:#?}");
-        let vec_to_partition: HashMap<VectorId, PartitionId> = dist_map
-            .iter()
-            .map(|((partition_id, vector_id), _)| (*vector_id, *partition_id))
-            // .filter(|(_, id)| candidate_ids.contains(id) || *id == closet_partition_id)
-            .chain([(VectorId(value.id), closet_partition_id)])
-            .collect();
-        let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
-        for (vector_id, partition_id) in &vec_to_partition {
-            partition_to_vectors
-                .entry(*partition_id)
-                .or_insert_with(HashSet::new)
-                .insert(*vector_id);
-        }
+        // let vec_to_partition: HashMap<VectorId, PartitionId> = dist_map
+        //     .iter()
+        //     .map(|((partition_id, vector_id), _)| (*vector_id, *partition_id))
+        //     .chain([(VectorId(value.id), closet_partition_id)])
+        //     .collect();
+        // let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
+        // for (vector_id, partition_id) in &vec_to_partition {
+        //     partition_to_vectors
+        //         .entry(*partition_id)
+        //         .or_insert_with(HashSet::new)
+        //         .insert(*vector_id);
+        // }
         // vector_id -> dist
-        let dist_map: HashMap<VectorId, A> = dist_map
-            .iter()
-            .map(|((_, vector_id), dist)| (*vector_id, *dist))
-            .collect();
+        
+
+        // update dist_map to include missing partitions
+        let (dist_map, vec_to_partition, partition_to_vectors) = {
+            let mut vec_to_partition: HashMap<VectorId, PartitionId> = dist_map
+                .iter()
+                .map(|((partition_id, vector_id), _)| (*vector_id, *partition_id))
+                .chain([(VectorId(value.id), closet_partition_id)])
+                .collect();
+            let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
+            for (vector_id, partition_id) in &vec_to_partition {
+                partition_to_vectors
+                    .entry(*partition_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(*vector_id);
+            }
+
+            let mut missing_partitions = neighbor_ids.clone();
+            let mut dist_map: HashMap<VectorId, A> = dist_map
+                .iter()
+                .map(|((partition_id, vector_id), dist)| {
+                    missing_partitions.remove(partition_id);
+                    (*vector_id, *dist)
+                })
+                .collect();
+
+            let partition_buffer = &mut *w_partition_buffer;
+            while missing_partitions.len() > 0 {
+                let mut acquired_partitions = Vec::new();
+                event!(
+                    Level::DEBUG,
+                    "Attempt to acquired required ids that aren't loaded"
+                );
+                for id in missing_partitions.iter() {
+                    // Replace with try access and/or batch access
+                    let Ok(partition) = partition_buffer.access(&**id).await else {
+                        continue;
+                    };
+    
+                    acquired_partitions.push(partition);
+                }
+    
+                let mut acquired_partitions_locks = Vec::new();
+                {
+                    for partition in acquired_partitions.iter() {
+                        if let Ok(lock) = partition.try_read() {
+                            acquired_partitions_locks.push(lock);
+                        }
+                    }
+                }
+    
+                let mut partitions = Vec::new();
+                {
+                    for partition in acquired_partitions_locks.iter() {
+                        if let Some(inner) = &**partition {
+                            partitions.push(inner);
+                        }
+                    }
+                }
+    
+                if partitions.len() > 0 {
+                    // get closet_id & dist
+                    // get get closet dist for each partition
+                    let (_, new_dist_map) =
+                        find_closet_vectors(value, partitions.as_slice());
+    
+                    dist_map.extend(
+                        new_dist_map.iter()
+                            .map(|((partition_id, vector_id), dist)| {
+                                vec_to_partition.insert(*vector_id, *partition_id);
+                                
+                                partition_to_vectors
+                                    .entry(*partition_id)
+                                    .or_insert_with(HashSet::new)
+                                    .insert(*vector_id);
+
+                                (*vector_id, *dist)
+                            })
+                    );
+
+                    
+
+                    partitions
+                        .iter()
+                        .map(|partition| PartitionId(partition.id))
+                        .for_each(|id| {
+                            missing_partitions.remove(&id);
+                        });
+    
+                    if missing_partitions.len() == 0 {
+                        break;
+                    }
+                    partitions.clear();
+                    acquired_partitions_locks = Vec::new();
+                    acquired_partitions = Vec::new();
+                }
+    
+                //unload and swap
+                let mut least_used = partition_buffer.least_used_iter().await;
+    
+                for id in missing_partitions.clone() {
+                    match partition_buffer.load(&*id).await {
+                        Ok(_) => {
+                            event!(Level::DEBUG, "📦 Load buffer space");
+                            // partitions.push(partition_buffer.access(&*id).await.unwrap());
+                        }
+                        Err(BufferError::OutOfSpace) => {
+                            event!(Level::DEBUG, "📦 Unload and Load buffer space");
+    
+                            let Some(least_used) = &mut least_used else {
+                                continue;
+                            };
+    
+                            let Some(unload_id) = least_used.next() else {
+                                break;
+                            };
+    
+                            partition_buffer
+                                .unload_and_load(&unload_id.1, &*id)
+                                .await
+                                .unwrap();
+                            // partitions.push(partition_buffer.access(&*id).await.unwrap());
+                        }
+                        Err(BufferError::FileNotFound) => {
+                            todo!()
+                        }
+                        Err(_) => todo!(),
+                    };
+                }
+            }
+            
+            (dist_map, vec_to_partition, partition_to_vectors)
+        };
 
         // list of ids in graph
         // get list of all edges and sort by distance (can be chunks)
@@ -1094,7 +1230,7 @@ where
                 .map(|(target, dist)| (VectorId(value.id), *target, *dist))
                 .filter(|(_, id, _)| vec_to_partition.get(id).is_some())
                 .filter(|(_, id, _)| {
-                    candidate_ids.contains(vec_to_partition.get(id).unwrap())
+                    neighbor_ids.contains(vec_to_partition.get(id).unwrap())
                         || vec_to_partition.get(id).unwrap() == &closet_partition_id
                 })
                 .for_each(|(source, target, dist)| {
