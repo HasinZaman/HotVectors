@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use cluster::ClusterRoutes;
 use graph::GraphRoutes;
 use partition::PartitionRoutes;
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,7 @@ impl<A: PartialEq + Clone + Copy + From<f32>, const CAP: usize> TryFrom<Vec<f32>
     }
 }
 
+pub mod cluster;
 pub mod graph;
 pub mod partition;
 pub mod vector;
@@ -46,7 +48,7 @@ pub(crate) trait AddRoute<F> {
 }
 
 pub async fn input_loop<
-    A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + 'static,
+    A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + From<f32> + 'static,
     B: VectorSpace<A> + Sized + Send + Sync + 'static + TryFrom<Vec<f32>>,
 >(
     sender: Sender<(Cmd<A, B>, Sender<Response<A>>)>,
@@ -64,6 +66,7 @@ where
     let app = AddRoute::<GraphRoutes>::add_routes(app);
     let app = AddRoute::<VectorRoutes>::add_routes(app);
     let app = AddRoute::<PartitionRoutes>::add_routes(app);
+    let app = AddRoute::<ClusterRoutes>::add_routes(app);
 
     let app = app.with_state(shared_state);
 

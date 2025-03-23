@@ -1,13 +1,21 @@
 use std::{
-    cmp::min, collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path,
-    sync::Arc, time::Duration,
+    cmp::{min, Ordering},
+    collections::HashMap,
+    fmt::Debug,
+    fs,
+    marker::PhantomData,
+    mem,
+    path::Path,
+    sync::Arc,
+    time::Duration,
 };
 
 use crate::vector::VectorSerial;
 use component::{
+    cluster::ClusterSet,
     data_buffer::DataBuffer,
     graph::{GraphSerial, InterGraphSerial, InterPartitionGraph, IntraPartitionGraph},
-    ids::{PartitionId, VectorId},
+    ids::{ClusterId, PartitionId, VectorId},
     meta::Meta,
     partition::{Partition, PartitionSerial, VectorEntry},
     serial::FileExtension,
@@ -15,6 +23,7 @@ use component::{
 use log::State;
 use operations::{
     add::add,
+    cluster::build_clusters_from_scratch,
     read::{
         knn::stream_exact_knn, stream_inter_graph, stream_meta_data, stream_partition_graph,
         stream_vectors_from_partition,
@@ -96,7 +105,13 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
         transaction_id: Option<Uuid>,
     },
 
-    PhantomData(PhantomData<A>),
+    // Clustering
+    CreateCluster {
+        threshold: A,
+    },
+    GetClusters {
+        threshold: A,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +135,7 @@ pub enum Success<A: Clone + Copy> {
     MetaData(PartitionId, usize, VectorSerial<A>),
     Knn(VectorId, A),
     Partition(PartitionId),
+    Cluster(ClusterId),
     Vector(VectorId, VectorSerial<A>),
     Edge(VectorId, VectorId, A),
     InterEdge((PartitionId, VectorId), (PartitionId, VectorId), A),
@@ -178,7 +194,6 @@ pub fn db_loop<
         + Clone
         + Copy
         + Extremes
-        // + Ord
         + Field<A>
         + Send
         + Sync
@@ -234,6 +249,7 @@ where
     const MIN_SPAN_DIR: &str = "data//min_span_trees";
     const PERSISTENT_DIR: &str = "data//persistent";
     const META_DATA_DIR: &str = "data//meta";
+    const CLUSTER_DATA_DIR: &str = "data//clusters";
 
     const GLOBAL_MIN_SPAN_FILE: &str = "global_min_span";
 
@@ -247,8 +263,11 @@ where
         GraphSerial<A>,
         MAX_LOADED,
     >::new(MIN_SPAN_DIR.into())));
-    let inter_spanning_graph = Arc::new(RwLock::new(InterPartitionGraph::<A>::new()));
-    let meta_data = Arc::new(RwLock::new(HashMap::new()));
+    let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
+        Arc::new(RwLock::new(InterPartitionGraph::<A>::new()));
+    let meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>> = Arc::new(RwLock::new(Vec::new()));
 
     // check if file environment
     event!(Level::INFO, "FILE CHECK🗄️🗄️");
@@ -256,6 +275,7 @@ where
         dir_initialized_with_files(PARTITION_DIR),
         dir_initialized_with_files(MIN_SPAN_DIR),
         dir_initialized_with_files(META_DATA_DIR),
+        dir_initialized_with_files(CLUSTER_DATA_DIR),
         file_exists(
             PERSISTENT_DIR,
             GLOBAL_MIN_SPAN_FILE,
@@ -361,6 +381,17 @@ where
                         meta_data.insert(*data.id, Arc::new(RwLock::new(data)));
                     });
                 }
+
+                // load clusters
+                {
+                    let cluster_data = &mut *cluster_sets.write().await;
+
+                    let mut loaded_data = ClusterSet::<A>::load_from_folder(CLUSTER_DATA_DIR).await;
+
+                    loaded_data.sort();
+
+                    *cluster_data = loaded_data;
+                }
             }
             (false, false) => panic!("Messed up file environment"),
         }
@@ -384,10 +415,32 @@ where
                 }
             });
         }
+        {
+            let partition_buffer = partition_buffer.clone();
+            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+
+            rt.spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(10)).await;
+
+                    {
+                        let partition_buffer = &*partition_buffer.read().await;
+
+                        partition_buffer.try_save().await;
+                    }
+                    {
+                        let min_spanning_tree_buffer = &*min_spanning_tree_buffer.read().await;
+
+                        min_spanning_tree_buffer.try_save().await;
+                    }
+                }
+            });
+        }
 
         {
             let meta_data = meta_data.clone();
             let inter_spanning_graph = inter_spanning_graph.clone();
+            let cluster_data = cluster_sets.clone();
 
             rt.spawn(async move {
                 loop {
@@ -409,6 +462,13 @@ where
                             let data = &*data.read().await;
 
                             data.save(META_DATA_DIR, &id.to_string()).await;
+                        }
+                    }
+                    // might not be nessearry due to no cached data
+                    {
+                        event!(Level::INFO, "Saving cluster_data 👠😎");
+                        for data in cluster_data.read().await.iter() {
+                            data.save(CLUSTER_DATA_DIR, &data.id.to_string()).await;
                         }
                     }
                 }
@@ -506,7 +566,6 @@ where
                             // create new write thread
                             todo!()
                         }
-
                         AtomicCmd::GetIds { transaction_id } => {
                             // read all ids from partitions
                             todo!()
@@ -524,7 +583,6 @@ where
                                 let _ = tx.send(Response::Done).await;
                             });
                         }
-
                         AtomicCmd::GetPartitionGraph {
                             transaction_id,
                             partition_id,
@@ -559,8 +617,6 @@ where
                                 let _ = tx.send(Response::Done).await;
                             });
                         }
-
-                        // stream_inter_graph
                         AtomicCmd::Knn {
                             vector,
                             k,
@@ -588,7 +644,6 @@ where
                                 let _ = tx.send(Response::Done).await;
                             });
                         }
-
                         AtomicCmd::Partitions { ids } => {
                             // should replace with a way to choose knn method
                             let meta_data = meta_data.clone();
@@ -613,7 +668,63 @@ where
                             // create a cache of vectors in Uuid
                             todo!()
                         }
-                        AtomicCmd::PhantomData(phantom_data) => panic!(""),
+                        AtomicCmd::CreateCluster { threshold } => {
+                            // generate cluster data
+                            let cluster_data = cluster_sets.clone();
+                            let meta_data = meta_data.clone();
+
+                            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+                            let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
+                                inter_spanning_graph.clone();
+
+                            rt.spawn(async move {
+                                // let cluster_data = &mut *cluster_data.write().await;
+                                build_clusters_from_scratch(
+                                    threshold,
+                                    meta_data,
+                                    cluster_data,
+                                    inter_spanning_graph,
+                                    min_spanning_tree_buffer,
+                                )
+                                .await;
+
+                                tx.send(Response::Done).await
+                            });
+                        }
+                        AtomicCmd::GetClusters { threshold } => {
+                            let cluster_sets = cluster_sets.clone();
+
+                            rt.spawn(async move {
+                                let cluster_sets = &*cluster_sets.read().await;
+                                match cluster_sets.binary_search_by(|x| {
+                                    x.threshold
+                                        .partial_cmp(&threshold)
+                                        .unwrap_or(Ordering::Equal) // == Ordering::Equal
+                                }) {
+                                    Ok(pos) => {
+                                        let cluster_set = &cluster_sets[pos];
+
+                                        for cluster_id in cluster_set.get_clusters().await {
+                                            let vector_ids =
+                                                cluster_set.get_cluster_members(cluster_id).await;
+
+                                            for vec_id in vector_ids {
+                                                let _ =
+                                                    tx.send(Response::Success(Success::Vector(
+                                                        vec_id,
+                                                        VectorSerial(Vec::new()),
+                                                    )));
+                                            }
+                                        }
+
+                                        let _ = tx.send(Response::Done).await;
+                                    }
+                                    Err(_) => {
+                                        let _ = tx.send(Response::Fail).await;
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 Cmd::Chained(chained_cmd) => {

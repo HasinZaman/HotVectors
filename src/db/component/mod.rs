@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod data_buffer;
 pub mod graph;
 pub mod ids;

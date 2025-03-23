@@ -1,0 +1,311 @@
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    sync::Arc,
+    vec,
+};
+
+use petgraph::{graph, visit::EdgeRef};
+use rancor::Strategy;
+use rkyv::{
+    bytecheck::CheckBytes,
+    de::Pool,
+    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
+    Archive, Deserialize,
+};
+use tokio::sync::RwLock;
+use tracing::{debug, info, trace};
+use uuid::Uuid;
+
+use crate::{
+    db::component::{
+        cluster::ClusterSet,
+        data_buffer::DataBuffer,
+        graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
+        ids::{ClusterId, PartitionId, VectorId},
+        meta::Meta,
+    },
+    vector::{Field, VectorSpace},
+};
+
+pub async fn build_clusters_from_scratch<
+    A: Field<A>
+        + Debug
+        + Clone
+        + Copy
+        + Archive
+        + for<'a> rkyv::Serialize<
+            rancor::Strategy<
+                rkyv::ser::Serializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'a>,
+                    rkyv::ser::sharing::Share,
+                >,
+                rancor::Error,
+            >,
+        > + PartialOrd,
+    B: VectorSpace<A> + Clone,
+    const CAP: usize,
+>(
+    threshold: A,
+
+    meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
+
+    cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>>, // maybe replace with a databuffer in the future??
+
+    inter_graph: Arc<RwLock<InterPartitionGraph<A>>>,
+    intra_graph_buffer: Arc<RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, CAP>>>,
+) where
+    <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
+    for<'a> <A as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+{
+    let cluster_sets = &mut *cluster_sets.write().await;
+    match cluster_sets.binary_search_by(|x| {
+        x.threshold
+            .partial_cmp(&threshold)
+            .unwrap_or(Ordering::Equal) // == Ordering::Equal
+    }) {
+        Ok(_) => {
+            trace!("Cluster set with threshold {:?} already exists.", threshold);
+        }
+        Err(pos) => {
+            info!("Creating a new cluster set at position {}", pos);
+            let meta_data = &*meta_data.read().await;
+            let inter_graph = &*inter_graph.read().await;
+
+            let mut cluster_set = ClusterSet::new(threshold).await;
+
+            let partition_id = *meta_data.iter().next().unwrap().0;
+            debug!("Processing partition ID: {:?}", partition_id);
+
+            let mut partition_stack = Vec::new();
+            let mut visited_partitions = HashSet::new();
+            let mut cluster_edges = Vec::new();
+
+            visited_partitions.insert(PartitionId(partition_id));
+            {
+                let mut rw_graph_buffer = intra_graph_buffer.write().await;
+                let graph_buffer = &mut rw_graph_buffer;
+
+                let r_graph = graph_buffer.access(&partition_id).await.unwrap();
+                let Some(graph) = &*r_graph.read().await else {
+                    trace!("No graph found for partition {:?}", partition_id);
+                    todo!()
+                };
+
+                let _ = rw_graph_buffer.downgrade();
+
+                trace!(
+                    "Graph found for partition {:?}, starting clustering.",
+                    partition_id
+                );
+                let mut cluster_id = cluster_set.new_cluster().await.unwrap();
+
+                let (start_vector, _) = graph.1.iter().next().unwrap();
+
+                debug!(
+                    "Initial cluster ID: {:?} assigned to vector {:?}",
+                    cluster_id, start_vector
+                );
+                let _ = cluster_set.insert(*start_vector, cluster_id).await;
+
+                let mut vector_to_cluster = HashMap::new();
+                vector_to_cluster.insert(start_vector, cluster_id);
+
+                let mut visit_stack = vec![start_vector];
+                let mut cluster_seeds = Vec::new();
+
+                while vector_to_cluster.len() < graph.1.len() {
+                    let vector = match (visit_stack.len() > 0, cluster_seeds.len() > 0) {
+                        (true, _) => visit_stack.pop().unwrap(),
+                        (false, true) => {
+                            let (vector, new_cluster_id) = cluster_seeds.pop().unwrap();
+
+                            cluster_id = new_cluster_id;
+
+                            vector
+                        }
+                        (false, false) => {
+                            trace!("All vectors processed, breaking loop.");
+                            todo!()
+                        }
+                    };
+                    println!("START VECTOR :- {vector:#?}");
+                    println!("CLUSTER GRAPH :- {graph:#?}");
+                    for edge_ref in graph.0.edges(graph.1[vector]) {
+                        let weight = edge_ref.weight();
+
+                        let source = graph.0.node_weight(edge_ref.source()).unwrap();
+                        let target = graph.0.node_weight(edge_ref.target()).unwrap();
+
+                        let out_bound_vec = match source == vector {
+                            true => target,
+                            false => source,
+                        };
+
+                        if vector_to_cluster.contains_key(out_bound_vec) {
+                            println!("Outbound vec already visited :- {out_bound_vec:#?}");
+                            continue;
+                        }
+                        println!("Outbound vec :- {out_bound_vec:#?}");
+
+                        if weight < &threshold {
+                            let _ = cluster_set.insert(*out_bound_vec, cluster_id).await;
+                            visit_stack.push(out_bound_vec);
+                            println!(
+                                "Added vector {:?} to cluster {:?}",
+                                out_bound_vec, cluster_id
+                            );
+                        } else {
+                            cluster_edges.push((*vector, *out_bound_vec));
+
+                            let new_cluster = cluster_set.new_cluster().await.unwrap();
+                            let _ = cluster_set.insert(*out_bound_vec, new_cluster).await;
+                            cluster_seeds.push((out_bound_vec, new_cluster));
+                            println!(
+                                "Created new cluster {:?} for vector {:?}",
+                                new_cluster, out_bound_vec
+                            );
+                        }
+                    }
+
+                    vector_to_cluster.insert(vector, cluster_id);
+                    info!("Cluster set added at position {}", pos);
+                }
+
+                for edge_ref in inter_graph
+                    .0
+                    .edges(inter_graph.1[&PartitionId(partition_id)])
+                {
+                    let (weight, source, target) = edge_ref.weight();
+
+                    let ((_, source_vector), (target_partition, target_vector)) =
+                        match source.0 == PartitionId(partition_id) {
+                            true => (source, target),
+                            false => (target, source),
+                        };
+
+                    let source_cluster = vector_to_cluster[&source_vector];
+
+                    if weight < &threshold {
+                        partition_stack.push((source_cluster, target_partition, target_vector));
+                    } else {
+                        cluster_edges.push((*source_vector, *target_vector));
+                        let cluster_id = cluster_set.new_cluster().await.unwrap();
+                        partition_stack.push((cluster_id, target_partition, target_vector));
+                    }
+                }
+            }
+
+            while partition_stack.len() > 0 {
+                let (mut cluster_id, partition_id, start_vector) = partition_stack.pop().unwrap();
+
+                visited_partitions.insert(*partition_id);
+
+                let mut rw_graph_buffer = intra_graph_buffer.write().await;
+                let graph_buffer = &mut rw_graph_buffer;
+
+                let r_graph = graph_buffer.access(&partition_id).await.unwrap();
+                let Some(graph) = &*r_graph.read().await else {
+                    todo!()
+                };
+
+                let _ = rw_graph_buffer.downgrade();
+
+                let mut vector_to_cluster = HashMap::new();
+
+                let mut visit_stack = vec![start_vector];
+                let mut cluster_seeds = Vec::new();
+
+                while vector_to_cluster.len() < graph.1.len() {
+                    let vector = match (visit_stack.len() > 0, cluster_seeds.len() > 0) {
+                        (true, _) => visit_stack.pop().unwrap(),
+                        (false, true) => {
+                            let (vector, new_cluster_id) = cluster_seeds.pop().unwrap();
+
+                            cluster_id = new_cluster_id;
+
+                            vector
+                        }
+                        (false, false) => todo!(),
+                    };
+
+                    for edge_ref in graph.0.edges(graph.1[vector]) {
+                        let weight = edge_ref.weight();
+
+                        let source = graph.0.node_weight(edge_ref.source()).unwrap();
+                        let target = graph.0.node_weight(edge_ref.target()).unwrap();
+
+                        let out_bound_vec = match source == vector {
+                            true => target,
+                            false => source,
+                        };
+
+                        if vector_to_cluster.contains_key(out_bound_vec) {
+                            continue;
+                        }
+
+                        if weight < &threshold {
+                            let _ = cluster_set.insert(*out_bound_vec, cluster_id).await;
+                            visit_stack.push(out_bound_vec);
+                        } else {
+                            cluster_edges.push((*vector, *out_bound_vec));
+
+                            let new_cluster = cluster_set.new_cluster().await.unwrap();
+                            let _ = cluster_set.insert(*out_bound_vec, new_cluster).await;
+                            cluster_seeds.push((out_bound_vec, new_cluster));
+                        }
+                    }
+
+                    vector_to_cluster.insert(vector, cluster_id);
+                }
+
+                for edge_ref in inter_graph.0.edges(inter_graph.1[partition_id]) {
+                    let (weight, source, target) = edge_ref.weight();
+
+                    let ((_, source_vector), (target_partition, target_vector)) =
+                        match source.0 == *partition_id {
+                            true => (source, target),
+                            false => (target, source),
+                        };
+
+                    if visited_partitions.contains(target_partition) {
+                        continue;
+                    }
+
+                    let source_cluster = vector_to_cluster[&source_vector];
+
+                    if weight < &threshold {
+                        partition_stack.push((source_cluster, target_partition, target_vector));
+                    } else {
+                        cluster_edges.push((*source_vector, *target_vector));
+
+                        let cluster_id = cluster_set.new_cluster().await.unwrap();
+                        partition_stack.push((cluster_id, target_partition, target_vector));
+                    }
+                }
+            }
+
+            cluster_sets.insert(pos, cluster_set);
+        }
+    };
+    info!("Finished building clusters.");
+}
+
+pub fn build_clusters_from_nearest_cluster() {
+    todo!()
+}
+
+fn build_smaller_clusters_from_nearest_cluster() {
+    todo!()
+}
+
+fn build_larger_clusters_from_nearest_cluster() {
+    todo!()
+}
+
+pub fn update_cluster() {
+    todo!()
+}
