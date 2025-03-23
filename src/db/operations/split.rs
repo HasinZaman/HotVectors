@@ -7,9 +7,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use heapify::{make_heap, pop_heap};
 use petgraph::visit::EdgeRef;
-use tracing::{event, Level};
 use uuid::Uuid;
 
 use crate::{
@@ -21,7 +19,7 @@ use crate::{
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
-struct PartitionSubSet<
+pub struct PartitionSubSet<
     'a,
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + Extremes,
@@ -46,7 +44,7 @@ impl<
     > From<PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>>
     for Partition<A, B, PARTITION_CAP, VECTOR_CAP>
 {
-    fn from(value: PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>) -> Self {
+    fn from(_value: PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>) -> Self {
         todo!()
     }
 }
@@ -212,7 +210,7 @@ impl<
 {
     fn split<'a>(
         target: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-        graph: &'a IntraPartitionGraph<A>,
+        _graph: &'a IntraPartitionGraph<A>,
     ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] {
         let centroid = target.centroid();
         let mut distances_1 = target
@@ -522,14 +520,20 @@ pub fn split_partition<
         return Err(PartitionErr::InsufficientSizeForSplits);
     }
 
-    if target.size == SPLITS {
-        // simple hard coded solution
-        // each vector in target becomes it's own partition
-        todo!()
-    }
-
     let new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] =
-        S::split(&target, &intra_graph);
+        match target.size == SPLITS {
+            true => {
+                let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+                    SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
+
+                target.iter().enumerate().for_each(|(idx, _)| {
+                    let _ = new_partitions[idx].add(idx).unwrap();
+                });
+
+                new_partitions
+            }
+            false => S::split(&target, &intra_graph),
+        };
 
     let partition_membership: HashMap<VectorId, usize> = new_partitions
         .iter()
@@ -612,13 +616,16 @@ pub fn split_partition<
                         partition_membership.get(&id_2.1),
                     ),
                 ) {
+                    // Need to redo this for better updating
                     ((true, Some(0) | None), (false, _)) => None,
-                    ((true, Some(n)), (false, _)) => {
+                    ((true | false, Some(n)), (false, _)) => {
                         Some((idx, (*dist, (intra_graphs[*n].2, id_1.1), *id_2)))
                     }
-
+                    // ((false, Some(n)), _) => {
+                    //     Some((idx, (*dist, (intra_graphs[*n].2, id_1.1), *id_2))) // maybe need to verify
+                    // }
                     ((false, _), (true, Some(0) | None)) => None,
-                    ((false, _), (true, Some(n))) => {
+                    ((false, _), (true | false, Some(n))) => {
                         Some((idx, (*dist, *id_1, (intra_graphs[*n].2, id_2.1))))
                     }
 
@@ -785,7 +792,7 @@ pub fn split_partition_into_trees<
             continue;
         }
 
-        let [(pair_1), pair_2] =
+        let [pair_1, pair_2] =
             split_partition::<A, B, FirstTreeSplitStrategy, PARTITION_CAP, VECTOR_CAP>(
                 partition,
                 graph,
