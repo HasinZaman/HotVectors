@@ -9,7 +9,10 @@ use std::{
 use heapify::{make_heap_with, pop_heap_with};
 use petgraph::{csr::DefaultIx, graph::EdgeIndex, visit::EdgeRef};
 
-use tokio::{runtime::Runtime, sync::{Mutex, RwLock}};
+use tokio::{
+    runtime::Runtime,
+    sync::{Mutex, RwLock},
+};
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -84,13 +87,15 @@ fn find_closet_vectors<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
     const PARTITION_CAP: usize,
-    const VECTOR_CAP: usize
+    const VECTOR_CAP: usize,
 >(
     vector: VectorEntry<A, B>,
     partitions: &[&Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
-
     // dist_map: &mut HashMap<(PartitionId, VectorId), A>,
-) -> (Vec<((PartitionId, VectorId), A)>, HashMap<(PartitionId, VectorId), A>) {
+) -> (
+    Vec<((PartitionId, VectorId), A)>,
+    HashMap<(PartitionId, VectorId), A>,
+) {
     if cfg!(feature = "gpu_processing") {
         todo!()
     } else {
@@ -114,7 +119,7 @@ fn find_closet_vectors<
                         .unwrap()
                 })
                 .collect(),
-            dist_map
+            dist_map,
         )
     }
 }
@@ -724,7 +729,6 @@ where
         let mut closet_id = None;
         let mut closet_dist = None;
 
-        
         loop {
             let mut acquired_partitions = Vec::new();
             event!(
@@ -766,7 +770,6 @@ where
                     find_closet_vectors(value, partitions.as_slice());
 
                 dist_map.extend(new_dist_map);
-
 
                 partition_distances
                     .iter()
@@ -849,11 +852,11 @@ where
     // needs to be updated (Requires loading in more partitions in order to get distance of all nearby vectors)
     closet_partition_id = closet_vector_id.0;
     {
-        let data = meta_data.get(&closet_partition_id).expect(&format!("Expect {closet_partition_id:?} in meta_data"));
+        let data = meta_data
+            .get(&closet_partition_id)
+            .expect(&format!("Expect {closet_partition_id:?} in meta_data"));
 
-        let Meta {
-            size, ..
-        } = &*data.try_read().unwrap();
+        let Meta { size, .. } = &*data.try_read().unwrap();
 
         closet_size = *size;
     };
@@ -922,7 +925,6 @@ where
                         let target_meta: &mut Meta<A, B> =
                             &mut *meta_data[&partition.id].write().await;
 
-                            
                         target_meta.size = partition.size;
                         target_meta.centroid = partition.centroid();
 
@@ -1031,20 +1033,6 @@ where
 
         // vector_id -> partition_id
         println!("{dist_map:#?}");
-        // let vec_to_partition: HashMap<VectorId, PartitionId> = dist_map
-        //     .iter()
-        //     .map(|((partition_id, vector_id), _)| (*vector_id, *partition_id))
-        //     .chain([(VectorId(value.id), closet_partition_id)])
-        //     .collect();
-        // let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
-        // for (vector_id, partition_id) in &vec_to_partition {
-        //     partition_to_vectors
-        //         .entry(*partition_id)
-        //         .or_insert_with(HashSet::new)
-        //         .insert(*vector_id);
-        // }
-        // vector_id -> dist
-        
 
         // update dist_map to include missing partitions
         let (dist_map, vec_to_partition, partition_to_vectors) = {
@@ -1080,12 +1068,13 @@ where
                 for id in missing_partitions.iter() {
                     // Replace with try access and/or batch access
                     let Ok(partition) = partition_buffer.access(&**id).await else {
+                        event!(Level::WARN, "⚠️ Failed to access partition {id:?}");
                         continue;
                     };
-    
+
                     acquired_partitions.push(partition);
                 }
-    
+
                 let mut acquired_partitions_locks = Vec::new();
                 {
                     for partition in acquired_partitions.iter() {
@@ -1094,7 +1083,7 @@ where
                         }
                     }
                 }
-    
+
                 let mut partitions = Vec::new();
                 {
                     for partition in acquired_partitions_locks.iter() {
@@ -1103,28 +1092,25 @@ where
                         }
                     }
                 }
-    
-                if partitions.len() > 0 {
+
+                if !missing_partitions.is_empty() {
+                    event!(Level::DEBUG, "📥 Processing newly acquired partitions");
                     // get closet_id & dist
                     // get get closet dist for each partition
-                    let (_, new_dist_map) =
-                        find_closet_vectors(value, partitions.as_slice());
-    
-                    dist_map.extend(
-                        new_dist_map.iter()
-                            .map(|((partition_id, vector_id), dist)| {
-                                vec_to_partition.insert(*vector_id, *partition_id);
-                                
-                                partition_to_vectors
-                                    .entry(*partition_id)
-                                    .or_insert_with(HashSet::new)
-                                    .insert(*vector_id);
+                    let (_, new_dist_map) = find_closet_vectors(value, partitions.as_slice());
 
-                                (*vector_id, *dist)
-                            })
-                    );
+                    dist_map.extend(new_dist_map.iter().map(
+                        |((partition_id, vector_id), dist)| {
+                            vec_to_partition.insert(*vector_id, *partition_id);
 
-                    
+                            partition_to_vectors
+                                .entry(*partition_id)
+                                .or_insert_with(HashSet::new)
+                                .insert(*vector_id);
+
+                            (*vector_id, *dist)
+                        },
+                    ));
 
                     partitions
                         .iter()
@@ -1132,18 +1118,19 @@ where
                         .for_each(|id| {
                             missing_partitions.remove(&id);
                         });
-    
-                    if missing_partitions.len() == 0 {
+
+                    if missing_partitions.is_empty() {
+                        event!(Level::DEBUG, "✅ All required partitions loaded");
                         break;
                     }
                     partitions.clear();
                     acquired_partitions_locks = Vec::new();
                     acquired_partitions = Vec::new();
                 }
-    
+
                 //unload and swap
                 let mut least_used = partition_buffer.least_used_iter().await;
-    
+
                 for id in missing_partitions.clone() {
                     match partition_buffer.load(&*id).await {
                         Ok(_) => {
@@ -1151,30 +1138,41 @@ where
                             // partitions.push(partition_buffer.access(&*id).await.unwrap());
                         }
                         Err(BufferError::OutOfSpace) => {
-                            event!(Level::DEBUG, "📦 Unload and Load buffer space");
-    
+                            event!(
+                                Level::DEBUG,
+                                "📦 Unloading and loading buffer space for partition {id:?}"
+                            );
+
                             let Some(least_used) = &mut least_used else {
                                 continue;
                             };
-    
-                            let Some(unload_id) = least_used.next() else {
+
+                            let Some((unload_idx, unload_id)) = least_used.next() else {
                                 break;
                             };
-    
+
+                            if missing_partitions.contains(&PartitionId(unload_id)) {
+                                continue;
+                            }
+
                             partition_buffer
-                                .unload_and_load(&unload_id.1, &*id)
+                                .unload_and_load(&unload_id, &*id)
                                 .await
                                 .unwrap();
                             // partitions.push(partition_buffer.access(&*id).await.unwrap());
                         }
                         Err(BufferError::FileNotFound) => {
+                            event!(Level::ERROR, "🛑 Partition {id:?} file not found!");
                             todo!()
                         }
-                        Err(_) => todo!(),
+                        Err(_) => {
+                            event!(Level::ERROR, "🛑 Unexpected error loading partition {id:?}");
+                            todo!()
+                        }
                     };
                 }
             }
-            
+
             (dist_map, vec_to_partition, partition_to_vectors)
         };
 
@@ -1478,28 +1476,27 @@ where
                     current_partition_id = partition_id;
 
                     if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
-
                         if calculate_number_of_trees(&graph) > 1 {
-                            let w_partition = resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
-                            let Some(partition) = &mut * w_partition.try_write().unwrap() else {
+                            let w_partition =
+                                resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
+                            let Some(partition) = &mut *w_partition.try_write().unwrap() else {
                                 todo!()
                             };
-        
-                            let pairs = split_partition_into_trees(partition, graph, inter_graph).unwrap();
-                        
+
+                            let pairs =
+                                split_partition_into_trees(partition, graph, inter_graph).unwrap();
+
                             for (new_partition, new_graph) in pairs {
-        
                                 if new_partition.id == partition.id {
                                     *partition = new_partition;
                                     *graph = new_graph;
-        
+
                                     let target_meta: &mut Meta<A, B> =
                                         &mut *meta_data[&partition.id].write().await;
-                
-                                            
+
                                     target_meta.size = partition.size;
                                     target_meta.centroid = partition.centroid();
-                
+
                                     target_meta.edge_length = (
                                         match graph.smallest_edge() {
                                             Some(x) => x.2,
@@ -1510,8 +1507,7 @@ where
                                             None => A::min(),
                                         },
                                     );
-                                }
-                                else {
+                                } else {
                                     meta_data.insert(
                                         new_partition.id,
                                         Arc::new(RwLock::new(Meta::new(
@@ -1530,9 +1526,19 @@ where
                                             ),
                                         ))),
                                     );
-            
-                                    resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
-                                    resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [partition.id]);
+
+                                    resolve_buffer!(
+                                        PUSH,
+                                        partition_buffer,
+                                        new_partition,
+                                        [partition.id]
+                                    );
+                                    resolve_buffer!(
+                                        PUSH,
+                                        min_span_tree_buffer,
+                                        new_graph,
+                                        [partition.id]
+                                    );
                                 }
                             }
                         };
@@ -1548,28 +1554,26 @@ where
             }
 
             if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
-
                 if calculate_number_of_trees(&graph) > 1 {
-                    let w_partition = resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
-                    let Some(partition) = &mut * w_partition.try_write().unwrap() else {
+                    let w_partition =
+                        resolve_buffer!(ACCESS, partition_buffer, *current_partition_id);
+                    let Some(partition) = &mut *w_partition.try_write().unwrap() else {
                         todo!()
                     };
 
                     let pairs = split_partition_into_trees(partition, graph, inter_graph).unwrap();
-                
-                    for (new_partition, new_graph) in pairs {
 
+                    for (new_partition, new_graph) in pairs {
                         if new_partition.id == partition.id {
                             *partition = new_partition;
                             *graph = new_graph;
 
                             let target_meta: &mut Meta<A, B> =
                                 &mut *meta_data[&partition.id].write().await;
-        
-                                    
+
                             target_meta.size = partition.size;
                             target_meta.centroid = partition.centroid();
-        
+
                             target_meta.edge_length = (
                                 match graph.smallest_edge() {
                                     Some(x) => x.2,
@@ -1580,8 +1584,7 @@ where
                                     None => A::min(),
                                 },
                             );
-                        }
-                        else {
+                        } else {
                             meta_data.insert(
                                 new_partition.id,
                                 Arc::new(RwLock::new(Meta::new(
@@ -1600,7 +1603,7 @@ where
                                     ),
                                 ))),
                             );
-    
+
                             resolve_buffer!(PUSH, partition_buffer, new_partition, [partition.id]);
                             resolve_buffer!(PUSH, min_span_tree_buffer, new_graph, [partition.id]);
                         }
