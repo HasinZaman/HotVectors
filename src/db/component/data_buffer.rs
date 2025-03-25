@@ -104,6 +104,195 @@ impl Error for BufferError {
     }
 }
 
+#[macro_export]
+macro_rules! resolve_buffer {
+    (ACCESS, $buffer:expr, $id:expr) => {
+        'buffer_access: {
+            match $buffer.access(&$id).await {
+                Ok(value) => value,
+                Err(_) => {
+                    if let Ok(_) = $buffer.load(&$id).await {
+                        break 'buffer_access $buffer.access(&$id).await.unwrap();
+                    };
+
+                    let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+                    loop {
+                        event!(Level::DEBUG, "Attempt get least used");
+                        let Some(next_unload) = least_used.next() else {
+                            event!(Level::DEBUG, "Restarting least used iter");
+                            least_used = match $buffer.least_used_iter().await {
+                                Some(val) => val,
+                                None => continue,
+                            };
+                            continue;
+                        };
+
+                        event!(
+                            Level::DEBUG,
+                            "Filtering values any value that is equal to load goal"
+                        );
+                        if $id == PartitionId(next_unload.1) {
+                            continue;
+                        }
+
+                        event!(
+                            Level::DEBUG,
+                            "Attempt to unload({:?}) & load({:?})",
+                            next_unload.1,
+                            $id
+                        );
+                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                            event!(Level::DEBUG, "Err({err:?})");
+                            continue;
+                        };
+
+                        event!(Level::DEBUG, "Break loop and return");
+                        break $buffer.access(&$id).await.unwrap();
+                    }
+                }
+            }
+        }
+    };
+    (ACCESS, $buffer:expr, $id:expr, $loaded_ids:expr) => {
+        'buffer_access: {
+            match $buffer.access(&$id).await {
+                Ok(partition) => partition,
+                Err(_) => {
+                    if let Ok(_) = $buffer.load(&$id).await {
+                        break 'buffer_access $buffer.access(&$id).await.unwrap();
+                    };
+
+                    let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+                    loop {
+                        event!(Level::DEBUG, "Attempt get least used");
+                        let Some(next_unload) = least_used.next() else {
+                            event!(Level::DEBUG, "Restarting least used iter");
+                            least_used = match $buffer.least_used_iter().await {
+                                Some(val) => val,
+                                None => continue,
+                            };
+                            continue;
+                        };
+
+                        event!(
+                            Level::DEBUG,
+                            "Filtering values any value that is equal to load goal"
+                        );
+                        if $id == PartitionId(next_unload.1) {
+                            continue;
+                        }
+                        if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                            let unload_id = next_unload.1;
+                            let loaded_ids = $loaded_ids;
+                            event!(
+                                Level::DEBUG,
+                                "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                            );
+                            continue;
+                        }
+
+                        event!(
+                            Level::DEBUG,
+                            "Attempt to unload({:?}) & load({:?})",
+                            next_unload.1,
+                            $id
+                        );
+                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                            event!(Level::DEBUG, "Err({err:?})");
+                            continue;
+                        };
+
+                        event!(Level::DEBUG, "Break loop and return");
+                        break $buffer.access(&$id).await.unwrap();
+                    }
+                }
+            }
+        }
+    };
+    (PUSH, $buffer:expr, $value:expr) => {{
+        'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
+            let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+            loop {
+                event!(Level::DEBUG, "Attempt get least used");
+                let Some(next_unload) = least_used.next() else {
+                    event!(Level::DEBUG, "Restarting least used iter");
+                    least_used = $buffer.least_used_iter().await.unwrap();
+                    continue;
+                };
+
+                event!(
+                    Level::DEBUG,
+                    "Filtering values any value that is equal to loaded values"
+                );
+                // if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                //     let unload_id = next_unload.1;
+                //     let loaded_ids = $loaded_ids;
+                //     event!(
+                //         Level::DEBUG,
+                //         "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                //     );
+                //     continue;
+                // }
+
+                event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
+                if let Err(err) = $buffer
+                    .unload_and_push(&next_unload.1, $value.clone())
+                    .await
+                {
+                    event!(Level::DEBUG, "Err({err:?})");
+                    continue;
+                };
+
+                event!(Level::DEBUG, "Break loop");
+                break 'primary_loop;
+            }
+        }
+    }};
+    (PUSH, $buffer:expr, $value:expr, $loaded_ids:expr) => {{
+        'primary_loop: while let Err(_) = $buffer.push($value.clone()).await {
+            let mut least_used = $buffer.least_used_iter().await.unwrap();
+
+            loop {
+                event!(Level::DEBUG, "Attempt get least used");
+                let Some(next_unload) = least_used.next() else {
+                    event!(Level::DEBUG, "Restarting least used iter");
+                    least_used = $buffer.least_used_iter().await.unwrap();
+                    continue;
+                };
+
+                event!(
+                    Level::DEBUG,
+                    "Filtering values any value that is equal to loaded values"
+                );
+                if $loaded_ids.iter().any(|id| id == &next_unload.1) {
+                    let unload_id = next_unload.1;
+                    let loaded_ids = $loaded_ids;
+                    event!(
+                        Level::DEBUG,
+                        "unload_id:({unload_id}) in {loaded_ids:?} - Must skip."
+                    );
+                    continue;
+                }
+
+                event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
+                if let Err(err) = $buffer
+                    .unload_and_push(&next_unload.1, $value.clone())
+                    .await
+                {
+                    event!(Level::DEBUG, "Err({err:?})");
+                    continue;
+                };
+
+                event!(Level::DEBUG, "Break loop");
+                break 'primary_loop;
+            }
+        }
+    }};
+}
+
 pub struct LeastUsedIterator(Vec<(usize, usize, Uuid)>);
 
 impl LeastUsedIterator {
