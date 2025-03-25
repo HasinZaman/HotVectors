@@ -705,6 +705,9 @@ where
                                         let cluster_set = &cluster_sets[pos];
 
                                         for cluster_id in cluster_set.get_clusters().await {
+                                            let _ = tx.send(Response::Success(Success::Cluster(
+                                                cluster_id,
+                                            ))).await;
                                             let vector_ids =
                                                 cluster_set.get_cluster_members(cluster_id).await;
 
@@ -713,7 +716,7 @@ where
                                                     tx.send(Response::Success(Success::Vector(
                                                         vec_id,
                                                         VectorSerial(Vec::new()),
-                                                    )));
+                                                    ))).await;
                                             }
                                         }
 

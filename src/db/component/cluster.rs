@@ -165,16 +165,11 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(())
     }
 
-    
     pub async fn get_clusters(&self) -> Vec<ClusterId> {
         let cluster_ids = self
             .conn
             .conn(|conn| {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT cluster_id FROM ClusterMeta",
-                    )
-                    .unwrap();
+                let mut stmt = conn.prepare("SELECT cluster_id FROM ClusterMeta").unwrap();
 
                 let rows: Vec<ClusterId> = stmt
                     .query_map([], |row| {
@@ -194,15 +189,12 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         cluster_ids.unwrap()
     }
 
-
     pub async fn get_cluster_members(&self, id: ClusterId) -> Vec<VectorId> {
         let vectors = self
             .conn
             .conn(move |conn| {
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT vector_id FROM Clusters WHERE cluster_id = ?",
-                    )
+                    .prepare("SELECT vector_id FROM Clusters WHERE cluster_id = ?")
                     .unwrap();
 
                 let rows: Vec<VectorId> = stmt
