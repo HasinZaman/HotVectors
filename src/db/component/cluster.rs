@@ -147,6 +147,31 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(())
     }
 
+    pub async fn merge_clusters(
+        &mut self,
+        cluster_id_1: ClusterId,
+        cluster_id_2: ClusterId,
+    ) -> Result<(), ()> {
+        self.conn
+            .conn(move |conn| {
+                let _ = conn.execute(
+                    "UPDATE Clusters SET cluster_id=? WHERE cluster_id=?",
+                    (cluster_id_1.0.to_string(), cluster_id_2.0.to_string()),
+                );
+
+                let _ = conn.execute(
+                    "DELETE FROM ClusterMeta WHERE cluster_id=?",
+                    (cluster_id_2.0.to_string(),),
+                );
+
+                Ok(())
+            })
+            .await
+            .expect("Failed to merge clusters");
+
+        Ok(())
+    }
+
     pub async fn insert_cluster_edge(
         &mut self,
         vector_id_1: VectorId,
@@ -187,6 +212,33 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
             .await;
 
         cluster_ids.unwrap()
+    }
+
+    pub async fn get_cluster(&self, vector_id: VectorId) -> Result<ClusterId, ()> {
+        let cluster_id = self
+            .conn
+            .conn(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT cluster_id FROM Clusters WHERE vector_id = ?")
+                    .unwrap();
+
+                let cluster_id: ClusterId = stmt
+                    .query_map([vector_id.0.to_string()], |row| {
+                        let uuid_str: String = row.get(0).unwrap();
+                        let uuid = Uuid::from_str(&uuid_str).unwrap();
+
+                        Ok(ClusterId(uuid))
+                    })
+                    .unwrap()
+                    .map(|x| x.unwrap())
+                    .next()
+                    .unwrap();
+
+                Ok(cluster_id)
+            })
+            .await;
+
+        Ok(cluster_id.unwrap())
     }
 
     pub async fn get_cluster_members(&self, id: ClusterId) -> Vec<VectorId> {

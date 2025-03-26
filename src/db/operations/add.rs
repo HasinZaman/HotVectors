@@ -31,6 +31,7 @@ use crate::{
     db::{
         component::{
             self,
+            cluster::ClusterSet,
             data_buffer::{BufferError, DataBuffer},
             graph::{GraphSerial, IntraPartitionGraph},
             ids::{PartitionId, VectorId},
@@ -49,41 +50,6 @@ use crate::{
 };
 
 use super::InterPartitionGraph;
-
-// fn find_closet_vector<
-//     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
-//     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
-//     const PARTITION_CAP: usize,
-//     const VECTOR_CAP: usize,
-// >(
-//     vector: VectorEntry<A, B>,
-//     partitions: &[&Partition<A, B, PARTITION_CAP, VECTOR_CAP>],
-
-//     dist_map: &mut HashMap<(PartitionId, VectorId), A>,
-// ) -> ((PartitionId, VectorId), A) {
-//     if cfg!(feature = "gpu_processing") {
-//         todo!()
-//     } else {
-//         partitions
-//             .iter()
-//             .map(|x| {
-//                 x.iter()
-//                     .map(|y| ((PartitionId(x.id), VectorId(y.id)), y.vector))
-//             })
-//             .flatten()
-//             .map(|(id, vec)| {
-//                 let dist = B::dist(&vector.vector, &vec);
-
-//                 dist_map.insert(id, dist);
-
-//                 (id, dist)
-//             })
-//             .min_by(|(id_1, dist_1), (id_2, dist_2)| {
-//                 dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
-//             })
-//             .unwrap()
-//     }
-// }
 
 fn find_closet_vectors<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd,
@@ -147,233 +113,6 @@ fn add_into_partition<
     Ok(())
 }
 
-fn group_edges<A: PartialEq + Clone + Copy + Field<A>>(
-    edges: Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )>,
-) -> HashMap<
-    PartitionId,
-    Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )>,
-> {
-    let mut partition_map = HashMap::new();
-
-    for edge in edges {
-        let (idx, dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2)) = edge;
-
-        partition_map
-            .entry(partition_id_2)
-            .or_insert_with(Vec::new)
-            .push((
-                idx,
-                dist,
-                (partition_id_1, vector_id_1),
-                (partition_id_2, vector_id_2),
-            ));
-    }
-
-    partition_map
-}
-
-fn update_local_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug>(
-    vector_id: VectorId,
-
-    partition_id: PartitionId,
-
-    target_vector_id: VectorId,
-
-    inter_graph: &InterPartitionGraph<A>, // Used to determine all foreign edges that need to be updated
-    min_spanning_graph: &mut IntraPartitionGraph<A>,
-
-    dist_map: HashMap<VectorId, A>,
-) -> Result<
-    Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )>,
-    PartitionErr,
->
-where
-    IntraPartitionGraph<A>: Debug,
-{
-    let node_index = min_spanning_graph.add_node(vector_id);
-
-    // check if new inter_graph to replace intra_edges
-    let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
-        .0
-        .edges(
-            *min_spanning_graph.1.get(&target_vector_id).expect(&format!(
-                "Failed to extract {target_vector_id:?} from {min_spanning_graph:#?}"
-            )),
-        )
-        .map(|edge| {
-            (
-                edge.id(),
-                min_spanning_graph.0.node_weight(edge.target()).unwrap(),
-                min_spanning_graph.0.node_weight(edge.source()).unwrap(),
-                edge.weight(),
-            )
-        })
-        .map(
-            |(edge_index, target, source, dist)| match target == &target_vector_id {
-                true => (edge_index, source, dist),
-                false => (edge_index, target, dist),
-            },
-        )
-        .filter(|(_, id, dist)| dist < &&dist_map[*id])
-        .map(|(edge_index, id, _)| (edge_index, *id))
-        .collect();
-
-    // add new edges
-    replace_edges
-        .iter()
-        .map(|(_, target_id)| (dist_map[target_id], *target_id, vector_id))
-        .for_each(|(dist, id_1, id_2)| {
-            min_spanning_graph.add_edge(id_1, id_2, dist);
-        });
-
-    // remove edges
-    replace_edges
-        .into_iter()
-        .map(|(edge_index, _)| edge_index)
-        .for_each(|edge_index| {
-            min_spanning_graph.0.remove_edge(edge_index);
-        });
-
-    min_spanning_graph.0.add_edge(
-        node_index,
-        min_spanning_graph.1[&target_vector_id],
-        dist_map[&target_vector_id],
-    );
-
-    let replace_inter_edges: Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )> = inter_graph
-        .0
-        .edges(inter_graph.1[&partition_id])
-        .map(|edge| (edge.id(), edge.weight()))
-        .filter_map(|(idx, (dist, id_1, id_2))| {
-            match (
-                id_1 == &(partition_id, target_vector_id),
-                id_2 == &(partition_id, target_vector_id),
-            ) {
-                (true, false) => Some((idx, *dist, *id_1, *id_2)),
-                (false, true) => Some((idx, *dist, *id_2, *id_1)),
-                _ => None,
-            }
-        })
-        .collect();
-
-    Ok(replace_inter_edges)
-}
-
-fn update_foreign_min_span_tree<A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug>(
-    source_id: PartitionId,
-    vector_id: VectorId,
-
-    target_partition_id: PartitionId,
-    target_vector_id: VectorId,
-
-    inter_graph: &mut InterPartitionGraph<A>, // Used to determine all foreign edges that need to be updated
-    min_spanning_graph: &mut IntraPartitionGraph<A>,
-
-    dist_map: HashMap<VectorId, A>,
-) -> Result<
-    Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )>,
-    PartitionErr,
->
-where
-    IntraPartitionGraph<A>: Debug,
-{
-    let replace_inter_edges: Vec<(
-        EdgeIndex,
-        A,
-        (PartitionId, VectorId),
-        (PartitionId, VectorId),
-    )> = inter_graph
-        .0
-        .edges(inter_graph.1[&target_partition_id])
-        .map(|edge| (edge.id(), edge.weight()))
-        .filter_map(|(idx, (dist, id_1, id_2))| {
-            match (
-                id_1 == &(target_partition_id, target_vector_id),
-                id_2 == &(target_partition_id, target_vector_id),
-            ) {
-                // (target_id, other)
-                (true, false) => Some((idx, *dist, *id_1, *id_2)),
-                (false, true) => Some((idx, *dist, *id_2, *id_1)),
-                _ => None,
-            }
-        })
-        .collect();
-
-    // check if new inter_graph to replace intra_edges
-    let replace_edges: Vec<(EdgeIndex, VectorId)> = min_spanning_graph
-        .0
-        .edges(match min_spanning_graph.1.get(&target_vector_id) {
-            Some(val) => *val,
-            None => {
-                panic!("Failed to extract {target_vector_id:?} from {min_spanning_graph:#?} ")
-            }
-        })
-        .map(|edge| {
-            (
-                edge.id(),
-                min_spanning_graph.0.node_weight(edge.target()).unwrap(),
-                min_spanning_graph.0.node_weight(edge.source()).unwrap(),
-                edge.weight(),
-            )
-        })
-        .map(
-            |(edge_index, target, source, dist)| match target == &target_vector_id {
-                true => (edge_index, source, dist),
-                false => (edge_index, target, dist),
-            },
-        )
-        .filter(|(_, id, dist)| dist < &&dist_map[*id])
-        .map(|(edge_index, id, _)| (edge_index, *id))
-        .collect();
-
-    // add new edges
-    replace_edges
-        .iter()
-        .map(|(_, target_id)| (dist_map[target_id], *target_id))
-        .for_each(|(dist, id_1)| {
-            inter_graph.add_edge(
-                source_id,
-                target_partition_id,
-                (dist, (target_partition_id, id_1), (source_id, vector_id)),
-            );
-        });
-
-    // remove edges
-    replace_edges
-        .into_iter()
-        .map(|(edge_index, _)| edge_index)
-        .for_each(|edge_index| {
-            min_spanning_graph.0.remove_edge(edge_index);
-        });
-
-    Ok(replace_inter_edges)
-}
-
 pub async fn add<
     A: PartialEq
         + PartialOrd
@@ -410,6 +149,8 @@ pub async fn add<
     >,
 
     meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
+
+    cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>>,
 ) -> Result<(), PartitionErr>
 where
     VectorSerial<A>: From<B>,
@@ -434,6 +175,9 @@ where
     event!(Level::DEBUG, "🔒 Locked `min_spanning_tree_buffer`");
 
     let inter_graph = &mut *inter_graph.write().await;
+    event!(Level::DEBUG, "🔒 Locked `inter_graph`");
+
+    let cluster_sets = &mut *cluster_sets.write().await;
     event!(Level::DEBUG, "🔒 Locked `inter_graph`");
 
     // find closet id
@@ -500,6 +244,15 @@ where
         meta.size = partition.size;
         meta.centroid = partition.centroid();
         // meta.edge_length = (todo!(), todo!());
+
+        for cluster_set in cluster_sets.iter_mut() {
+            event!(Level::DEBUG, "cluster_set({:?})", cluster_set.threshold);
+            let cluster_id = cluster_set.new_cluster().await.unwrap();
+            let _ = cluster_set
+                .insert(VectorId(value.id), cluster_id)
+                .await
+                .unwrap();
+        }
 
         return Ok(());
     }
@@ -820,6 +573,17 @@ where
 
         target_meta.size = partition.size;
         target_meta.centroid = partition.centroid();
+    }
+
+    {
+        for cluster_set in cluster_sets.iter_mut() {
+            event!(Level::DEBUG, "cluster_set({:?})", cluster_set.threshold);
+            let cluster_id = cluster_set.new_cluster().await.unwrap();
+            let _ = cluster_set
+                .insert(VectorId(value.id), cluster_id)
+                .await
+                .unwrap();
+        }
     }
 
     //update min_spanning
@@ -1219,7 +983,7 @@ where
             }
         }
         {
-            new_edges
+            let new_edges_iter = new_edges
                 .iter()
                 .filter(|(id_1, id_2, _)| vec_to_partition.get(id_1) != vec_to_partition.get(id_2))
                 .filter(|(id_1, id_2, _)| {
@@ -1236,10 +1000,32 @@ where
                             (*vec_to_partition.get(id_2).unwrap(), *id_2),
                         ),
                     )
-                })
-                .for_each(|(id_1, id_2, dist)| {
-                    inter_graph.add_edge(id_1, id_2, dist);
                 });
+
+            for (id_1, id_2, weight) in new_edges_iter {
+                inter_graph.add_edge(id_1, id_2, weight);
+
+                // room for optimization
+                for cluster_set in cluster_sets.iter_mut() {
+                    if cluster_set.threshold < weight.0 {
+                        continue;
+                    }
+
+                    let (_, (_, vector_id_1), (_, vector_id_2)) = weight;
+
+                    let cluster_id_1 = cluster_set.get_cluster(vector_id_1).await.unwrap();
+                    let cluster_id_2 = cluster_set.get_cluster(vector_id_2).await.unwrap();
+
+                    if cluster_id_1 == cluster_id_2 {
+                        continue;
+                    }
+
+                    let _ = cluster_set
+                        .merge_clusters(cluster_id_1, cluster_id_2)
+                        .await
+                        .unwrap();
+                }
+            }
         }
         'new_local: {
             let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
@@ -1279,6 +1065,26 @@ where
 
                 if let Some(graph) = &mut *rw_graph.write().await {
                     graph.add_edge(id_1, id_2, dist);
+
+                    // room for optimization
+                    for cluster_set in cluster_sets.iter_mut() {
+                        if cluster_set.threshold < dist {
+                            continue;
+                        }
+
+                        let cluster_id_1 = cluster_set.get_cluster(id_1).await.unwrap();
+                        let cluster_id_2 = cluster_set.get_cluster(id_2).await.unwrap();
+
+                        if cluster_id_1 == cluster_id_2 {
+                            continue;
+                        }
+
+                        let _ = cluster_set
+                            .merge_clusters(cluster_id_1, cluster_id_2)
+                            .await
+                            .unwrap();
+                    }
+                    // TODO - Update cluster (possible merge cluster(id_1) & cluster(id_2))
                 };
 
                 (partition_id, rw_graph)
@@ -1364,6 +1170,25 @@ where
                 // already in the buffer and shouldn't need to wait
                 if let Some(graph) = &mut *rw_graph.try_write().unwrap() {
                     graph.add_edge(id_1, id_2, dist);
+
+                    // room for optimization
+                    for cluster_set in cluster_sets.iter_mut() {
+                        if cluster_set.threshold < dist {
+                            continue;
+                        }
+
+                        let cluster_id_1 = cluster_set.get_cluster(id_1).await.unwrap();
+                        let cluster_id_2 = cluster_set.get_cluster(id_2).await.unwrap();
+
+                        if cluster_id_1 == cluster_id_2 {
+                            continue;
+                        }
+
+                        let _ = cluster_set
+                            .merge_clusters(cluster_id_1, cluster_id_2)
+                            .await
+                            .unwrap();
+                    }
                 };
             }
 

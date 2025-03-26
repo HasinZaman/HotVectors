@@ -415,27 +415,6 @@ where
                 }
             });
         }
-        {
-            let partition_buffer = partition_buffer.clone();
-            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
-
-            rt.spawn(async move {
-                loop {
-                    sleep(Duration::from_secs(10)).await;
-
-                    {
-                        let partition_buffer = &*partition_buffer.read().await;
-
-                        partition_buffer.try_save().await;
-                    }
-                    {
-                        let min_spanning_tree_buffer = &*min_spanning_tree_buffer.read().await;
-
-                        min_spanning_tree_buffer.try_save().await;
-                    }
-                }
-            });
-        }
 
         {
             let meta_data = meta_data.clone();
@@ -484,14 +463,14 @@ where
                     sleep(Duration::from_secs(40)).await; //60 * 1)).await;
                     {
                         event!(Level::INFO, "saving contents of partition_buffer");
-                        let w_partition_buffer_lock = partition_buffer.read().await;
-                        let partition_buffer = &*w_partition_buffer_lock;
+                        let r_partition_buffer_lock = partition_buffer.read().await;
+                        let partition_buffer = &*r_partition_buffer_lock;
                         partition_buffer.try_save().await;
                     }
                     {
                         event!(Level::INFO, "saving contents of min_spanning_tree_buffer");
-                        let w_min_spanning_tree_buffer = min_spanning_tree_buffer.read().await;
-                        let min_spanning_tree_buffer = &*w_min_spanning_tree_buffer;
+                        let r_min_spanning_tree_buffer = min_spanning_tree_buffer.read().await;
+                        let min_spanning_tree_buffer = &*r_min_spanning_tree_buffer;
                         min_spanning_tree_buffer.try_save().await;
                     }
                 }
@@ -535,6 +514,8 @@ where
 
                             let meta_data = meta_data.clone();
 
+                            let cluster_sets = cluster_sets.clone();
+
                             rt.spawn(async move {
                                 let value = VectorEntry::from_uuid(vector, id);
 
@@ -544,6 +525,7 @@ where
                                     partition_buffer,
                                     min_spanning_tree_buffer,
                                     meta_data,
+                                    cluster_sets,
                                 )
                                 .await
                                 {
@@ -670,7 +652,7 @@ where
                         }
                         AtomicCmd::CreateCluster { threshold } => {
                             // generate cluster data
-                            let cluster_data = cluster_sets.clone();
+                            let cluster_sets = cluster_sets.clone();
                             let meta_data = meta_data.clone();
 
                             let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
@@ -682,7 +664,7 @@ where
                                 build_clusters_from_scratch(
                                     threshold,
                                     meta_data,
-                                    cluster_data,
+                                    cluster_sets,
                                     inter_spanning_graph,
                                     min_spanning_tree_buffer,
                                 )
@@ -705,18 +687,21 @@ where
                                         let cluster_set = &cluster_sets[pos];
 
                                         for cluster_id in cluster_set.get_clusters().await {
-                                            let _ = tx.send(Response::Success(Success::Cluster(
-                                                cluster_id,
-                                            ))).await;
+                                            let _ = tx
+                                                .send(Response::Success(Success::Cluster(
+                                                    cluster_id,
+                                                )))
+                                                .await;
                                             let vector_ids =
                                                 cluster_set.get_cluster_members(cluster_id).await;
 
                                             for vec_id in vector_ids {
-                                                let _ =
-                                                    tx.send(Response::Success(Success::Vector(
+                                                let _ = tx
+                                                    .send(Response::Success(Success::Vector(
                                                         vec_id,
                                                         VectorSerial(Vec::new()),
-                                                    ))).await;
+                                                    )))
+                                                    .await;
                                             }
                                         }
 

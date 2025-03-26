@@ -6,7 +6,7 @@ use std::{
     vec,
 };
 
-use petgraph::{graph, visit::EdgeRef};
+use petgraph::visit::EdgeRef;
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -23,7 +23,7 @@ use crate::{
         cluster::ClusterSet,
         data_buffer::DataBuffer,
         graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
-        ids::{ClusterId, PartitionId, VectorId},
+        ids::PartitionId,
         meta::Meta,
     },
     vector::{Field, VectorSpace},
@@ -77,6 +77,7 @@ pub async fn build_clusters_from_scratch<
 
             let mut cluster_set = ClusterSet::new(threshold).await;
 
+            // should find first partition with vectors
             let partition_id = *meta_data.iter().next().unwrap().0;
             debug!("Processing partition ID: {:?}", partition_id);
 
@@ -94,6 +95,12 @@ pub async fn build_clusters_from_scratch<
                     trace!("No graph found for partition {:?}", partition_id);
                     todo!()
                 };
+
+                // temp solution (should check at very beginning)
+                if graph.1.len() == 0 {
+                    cluster_sets.insert(pos, cluster_set);
+                    return;
+                }
 
                 let _ = rw_graph_buffer.downgrade();
 
@@ -132,8 +139,6 @@ pub async fn build_clusters_from_scratch<
                             todo!()
                         }
                     };
-                    println!("START VECTOR :- {vector:#?}");
-                    println!("CLUSTER GRAPH :- {graph:#?}");
                     for edge_ref in graph.0.edges(graph.1[vector]) {
                         let weight = edge_ref.weight();
 
@@ -146,28 +151,18 @@ pub async fn build_clusters_from_scratch<
                         };
 
                         if vector_to_cluster.contains_key(out_bound_vec) {
-                            println!("Outbound vec already visited :- {out_bound_vec:#?}");
                             continue;
                         }
-                        println!("Outbound vec :- {out_bound_vec:#?}");
 
                         if weight < &threshold {
                             let _ = cluster_set.insert(*out_bound_vec, cluster_id).await;
                             visit_stack.push(out_bound_vec);
-                            println!(
-                                "Added vector {:?} to cluster {:?}",
-                                out_bound_vec, cluster_id
-                            );
                         } else {
                             cluster_edges.push((*vector, *out_bound_vec));
 
                             let new_cluster = cluster_set.new_cluster().await.unwrap();
                             let _ = cluster_set.insert(*out_bound_vec, new_cluster).await;
                             cluster_seeds.push((out_bound_vec, new_cluster));
-                            println!(
-                                "Created new cluster {:?} for vector {:?}",
-                                new_cluster, out_bound_vec
-                            );
                         }
                     }
 
