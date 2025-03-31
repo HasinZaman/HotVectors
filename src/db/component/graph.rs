@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug, str::FromStr};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Debug,
+    str::FromStr,
+};
 
 use petgraph::{
     csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, visit::EdgeRef, Undirected,
@@ -22,7 +27,154 @@ use rkyv::{
     Archive, Deserialize, DeserializeUnsized, Serialize,
 };
 
-use super::serial::FileExtension;
+use super::{ids::ClusterId, serial::FileExtension};
+
+#[derive(Debug, Clone)]
+pub struct InterClusterGraph<A: Field<A>>(
+    pub  StableGraph<
+        ClusterId,
+        (A, (ClusterId, VectorId), (ClusterId, VectorId)),
+        Undirected,
+        DefaultIx,
+    >,
+    pub HashMap<ClusterId, NodeIndex<DefaultIx>>,
+);
+
+impl<A: Field<A> + Clone + Copy> InterClusterGraph<A> {
+    pub fn new() -> Self {
+        Self(StableGraph::default(), HashMap::new())
+    }
+    pub async fn load(path: &str) -> Self
+    where
+        A: Archive,
+        [ArchivedTuple3<
+            u32_le,
+            u32_le,
+            ArchivedTuple3<
+                <A as Archive>::Archived,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+            >,
+        >]: DeserializeUnsized<
+            [(
+                usize,
+                usize,
+                (
+                    A,
+                    (std::string::String, std::string::String),
+                    (std::string::String, std::string::String),
+                ),
+            )],
+            Strategy<Pool, rancor::Error>,
+        >,
+        for<'a> <A as Archive>::Archived:
+            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    {
+        let bytes = tokio::fs::read(&path).await.unwrap();
+
+        from_bytes::<GraphSerial<(A, (String, String), (String, String))>, rancor::Error>(&bytes)
+            .unwrap()
+            .into()
+    }
+
+    pub async fn save(&self, dir: &str, name: &str)
+    where
+        A: Archive
+            + for<'a> rkyv::Serialize<
+                rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rancor::Error,
+                >,
+            >,
+        [ArchivedTuple3<
+            u32_le,
+            u32_le,
+            ArchivedTuple3<
+                <A as Archive>::Archived,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+                ArchivedTuple2<ArchivedString, ArchivedString>,
+            >,
+        >]: DeserializeUnsized<
+            [(
+                usize,
+                usize,
+                (
+                    A,
+                    (std::string::String, std::string::String),
+                    (std::string::String, std::string::String),
+                ),
+            )],
+            Strategy<Pool, rancor::Error>,
+        >,
+        for<'a> <A as Archive>::Archived:
+            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    {
+        let serial_data: InterGraphSerial<A> = self.clone().into();
+
+        let bytes = to_bytes::<rancor::Error>(&serial_data).unwrap();
+
+        tokio::fs::write(
+            &format!("{dir}//{name}.{}", InterGraphSerial::<A>::extension()),
+            bytes.as_slice(),
+        )
+        .await
+        .unwrap();
+    }
+
+    pub fn add_node(&mut self, node: ClusterId) -> NodeIndex {
+        let idx = self.0.add_node(node);
+        self.1.insert(node, idx);
+        idx
+    }
+
+    pub fn remove_node(&mut self, node: ClusterId) {
+        if let Some(idx) = self.1.remove(&node) {
+            self.0.remove_node(idx);
+        }
+    }
+
+    pub fn add_edge(
+        &mut self,
+        node_1: ClusterId,
+        node_2: ClusterId,
+        weight: (A, (ClusterId, VectorId), (ClusterId, VectorId)),
+    ) {
+        let idx_1 = self.1[&node_1];
+        let idx_2 = self.1[&node_2];
+        self.0.add_edge(idx_1, idx_2, weight);
+    }
+
+    pub fn remove_edge(
+        &mut self,
+        node_1: (ClusterId, VectorId),
+        node_2: (ClusterId, VectorId),
+    ) -> Result<(), ()> {
+        let Some((_, edge_idx)) = self
+            .0
+            .edges(
+                *self
+                    .1
+                    .get(&node_1.0)
+                    .unwrap_or_else(|| self.1.get(&node_2.0).unwrap()),
+            )
+            .map(|edge_ref| (edge_ref.weight(), edge_ref.id()))
+            .filter(|((_, id_1, id_2), _)| {
+                (id_1 == &node_1 && id_2 == &node_2) || (id_2 == &node_1 && id_1 == &node_2)
+            })
+            .next()
+        else {
+            return Err(());
+        };
+
+        self.0.remove_edge(edge_idx);
+
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InterPartitionGraph<A: Field<A>>(
@@ -169,6 +321,79 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
 
         Ok(())
     }
+
+    pub fn find_walk(
+        &self,
+        from: PartitionId,
+        to: PartitionId,
+    ) -> Result<Option<(A, Vec<(PartitionId, VectorId)>)>, ()> {
+        if !self.1.contains_key(&from) {
+            return Err(());
+        }
+
+        if !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_partitions: HashSet<PartitionId> = HashSet::new();
+        visited_partitions.insert(from);
+
+        let mut search_queue: Vec<(A, Vec<(PartitionId, VectorId)>)> = self
+            .0
+            .edges(self.1[&from])
+            .filter(|edge_ref| {
+                !visited_partitions.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+            })
+            .filter(|edge_ref| {
+                !visited_partitions.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+            })
+            .map(|edge_ref| {
+                let (weight, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2)) =
+                    edge_ref.weight();
+                let path = match partition_id_1 == &from {
+                    true => vec![(*partition_id_1, *vector_id_1), (*partition_id_2, *vector_id_2)],
+                    false => vec![(*partition_id_2, *vector_id_2), (*partition_id_1, *vector_id_1)],
+                };
+                (weight.clone(), path)
+            })
+            .collect();
+
+        while let Some((current_weight, current_path)) = search_queue.pop() {
+            let (partition_id, _vector_id) = current_path.last().unwrap();
+
+            if partition_id == &to {
+                return Ok(Some((current_weight, current_path)));
+            }
+
+            visited_partitions.insert(*partition_id);
+
+            self.0
+                .edges(self.1[&partition_id])
+                .filter(|edge_ref| {
+                    !visited_partitions.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                })
+                .filter(|edge_ref| {
+                    !visited_partitions.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                })
+                .for_each(|edge_ref| {
+                    let (weight, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2)) =
+                        edge_ref.weight();
+
+                    let next_node = match partition_id_1 == partition_id {
+                        true => (*partition_id_2, *vector_id_2),
+                        false => (*partition_id_1, *vector_id_1),
+                    };
+
+                    let mut new_path = current_path.clone();
+                    new_path.push(next_node);
+                    let new_weight = A::add(&current_weight, weight);
+
+                    search_queue.push((new_weight, new_path));
+                });
+        }
+
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +515,86 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
             .max_by(|(_, _, dist_1), (_, _, dist_2)| {
                 dist_1.partial_cmp(dist_2).unwrap_or(Ordering::Equal)
             })
+    }
+
+    pub fn find_walk(
+        &self,
+        from: VectorId,
+        to: VectorId,
+    ) -> Result<Option<(A, Vec<VectorId>)>, ()> {
+        if !self.1.contains_key(&from) {
+            return Err(());
+        }
+
+        if !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_vectors: HashSet<VectorId> = HashSet::new();
+        visited_vectors.insert(from);
+
+        let mut search_queue: Vec<(Vec<VectorId>, A)> = self
+            .0
+            .edges(self.1[&from])
+            .filter(|edge_ref| {
+                !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+            })
+            .filter(|edge_ref| {
+                !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+            })
+            .map(|edge_ref| {
+                let weight = edge_ref.weight().clone();
+                let (vector_id_1, vector_id_2) = (
+                    self.0.node_weight(edge_ref.source()).unwrap(),
+                    self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+                let path = match vector_id_1 == &from {
+                    true => vec![*vector_id_1, *vector_id_2],
+                    false => vec![*vector_id_2, *vector_id_1],
+                };
+                (path, weight)
+            })
+            .collect();
+
+        while !search_queue.is_empty() {
+            let (current_path, current_weight) = search_queue.pop().unwrap();
+
+            let vector_id = current_path.last().unwrap();
+
+            if vector_id == &to {
+                return Ok(Some((current_weight, current_path)));
+            }
+
+            visited_vectors.insert(*vector_id);
+
+            self.0
+                .edges(self.1[&vector_id])
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                })
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                })
+                .for_each(|edge_ref| {
+                    let weight = edge_ref.weight();
+                    let (vector_id_1, vector_id_2) = (
+                        self.0.node_weight(edge_ref.source()).unwrap(),
+                        self.0.node_weight(edge_ref.target()).unwrap(),
+                    );
+                    let next_node = match vector_id_1 == &from {
+                        true => *vector_id_1,
+                        false => *vector_id_2,
+                    };
+
+                    let mut new_path = current_path.clone();
+                    new_path.push(next_node);
+                    let new_weight = A::add(&current_weight, weight);
+
+                    search_queue.push((new_path, new_weight));
+                });
+        }
+
+        Ok(None)
     }
 }
 
@@ -436,6 +741,53 @@ impl<A: Field<A> + Clone + Copy> From<InterPartitionGraph<A>>
     }
 }
 
+impl<A: Field<A> + Clone + Copy> From<InterClusterGraph<A>>
+    for GraphSerial<(A, (String, String), (String, String))>
+{
+    fn from(value: InterClusterGraph<A>) -> Self {
+        let id_to_index_map: HashMap<ClusterId, usize> = value
+            .1
+            .iter()
+            .map(|(id, _)| id)
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+
+        GraphSerial {
+            ids: value
+                .1
+                .iter()
+                .map(|(id, _)| id)
+                .map(|x| x.to_string())
+                .collect(),
+            connections: value
+                .0
+                .edge_indices()
+                .map(|index| {
+                    (
+                        value.0.edge_endpoints(index).unwrap(),
+                        value.0.edge_weight(index).unwrap(),
+                    )
+                })
+                .map(
+                    |((start, end), (dist, (partition_1, vector_1), (partition_2, vector_2)))| {
+                        (
+                            id_to_index_map[value.0.node_weight(start).unwrap()],
+                            id_to_index_map[value.0.node_weight(end).unwrap()],
+                            (
+                                *dist,
+                                (partition_1.to_string(), vector_1.to_string()),
+                                (partition_2.to_string(), vector_2.to_string()),
+                            ),
+                        )
+                    },
+                )
+                .collect(),
+            id: None,
+        }
+    }
+}
+
 impl<A: Field<A> + Clone + Copy> From<GraphSerial<(A, (String, String), (String, String))>>
     for InterPartitionGraph<A>
 {
@@ -476,6 +828,57 @@ impl<A: Field<A> + Clone + Copy> From<GraphSerial<(A, (String, String), (String,
                             ),
                             (
                                 PartitionId(Uuid::from_str(&partition_2).unwrap()),
+                                VectorId(Uuid::from_str(&vector_2).unwrap()),
+                            ),
+                        ),
+                    );
+                },
+            );
+
+        Self(graph, uuid_to_index)
+    }
+}
+
+impl<A: Field<A> + Clone + Copy> From<GraphSerial<(A, (String, String), (String, String))>>
+    for InterClusterGraph<A>
+{
+    fn from(value: GraphSerial<(A, (String, String), (String, String))>) -> Self {
+        let mut graph = StableGraph::default();
+        let mut uuid_to_index = HashMap::new();
+
+        value
+            .ids
+            .iter()
+            .map(|id| ClusterId(Uuid::from_str(id).unwrap()))
+            .for_each(|id| {
+                let idx = graph.add_node(id);
+
+                uuid_to_index.insert(id, idx);
+            });
+
+        value
+            .connections
+            .iter()
+            .map(|(start_index, end_index, weight)| {
+                (
+                    uuid_to_index[&ClusterId(Uuid::from_str(&value.ids[*start_index]).unwrap())],
+                    uuid_to_index[&ClusterId(Uuid::from_str(&value.ids[*end_index]).unwrap())],
+                    weight,
+                )
+            })
+            .for_each(
+                |(id1, id2, (dist, (partition_1, vector_1), (partition_2, vector_2)))| {
+                    graph.add_edge(
+                        id1,
+                        id2,
+                        (
+                            *dist,
+                            (
+                                ClusterId(Uuid::from_str(&partition_1).unwrap()),
+                                VectorId(Uuid::from_str(&vector_1).unwrap()),
+                            ),
+                            (
+                                ClusterId(Uuid::from_str(&partition_2).unwrap()),
                                 VectorId(Uuid::from_str(&vector_2).unwrap()),
                             ),
                         ),
