@@ -3,11 +3,13 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Debug,
+    marker::PhantomData,
     mem,
     ops::{Index, IndexMut},
 };
 
 use petgraph::visit::EdgeRef;
+use tracing::{event, Level};
 use uuid::Uuid;
 
 use crate::{
@@ -199,14 +201,17 @@ pub trait SplitStrategy<
     ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS];
 }
 
-pub struct KMean;
+pub struct Stable;
+pub struct MaxAttempt<const ATTEMPTS: usize>;
+
+pub struct KMean<S>(PhantomData<S>);
 
 impl<
         A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
         B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
         const PARTITION_CAP: usize,
         const VECTOR_CAP: usize,
-    > SplitStrategy<A, B, PARTITION_CAP, VECTOR_CAP> for KMean
+    > SplitStrategy<A, B, PARTITION_CAP, VECTOR_CAP> for KMean<Stable>
 {
     fn split<'a>(
         target: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
@@ -248,9 +253,10 @@ impl<
 
             for i2 in 0..distances_2.len() {
                 let ref_vec_2 = distances_2[i2].0;
-                // if i1 == i2 {
-                //     panic!("End of list - attempted all possible solutions")
-                // }
+                if i1 == i2 {
+                    continue;
+                    // panic!("End of list - attempted all possible solutions")
+                }
                 let mut prev_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
                     SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
                 let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
@@ -277,6 +283,125 @@ impl<
                     .zip(new_partitions.iter())
                     .all(|(x, y)| x.vectors != y.vectors)
                 {
+                    mem::swap(&mut prev_partitions, &mut new_partitions);
+
+                    new_partitions.iter_mut().for_each(|x| x.clear());
+
+                    // CPU solution
+                    target
+                        .iter()
+                        .map(|vector| vector.vector)
+                        .map(|vector| {
+                            let (index, _) = prev_partitions
+                                .iter()
+                                .map(|new_partition| B::dist(&new_partition.centroid(), &vector))
+                                .enumerate()
+                                .min_by(|(_, x1), (_, x2)| {
+                                    x1.partial_cmp(x2).unwrap_or(Ordering::Equal)
+                                })
+                                .unwrap();
+
+                            index
+                        })
+                        .enumerate()
+                        .for_each(|(vector_index, partition_index)| {
+                            new_partitions[partition_index].add(vector_index).unwrap();
+                        });
+                }
+
+                if !new_partitions.iter().any(|s| s.size == target.size) {
+                    new_partitions[0].id = target.id.clone();
+
+                    return new_partitions;
+                };
+            }
+        }
+
+        todo!();
+    }
+}
+
+impl<
+        A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
+        B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
+        const PARTITION_CAP: usize,
+        const VECTOR_CAP: usize,
+        const ATTEMPTS: usize,
+    > SplitStrategy<A, B, PARTITION_CAP, VECTOR_CAP> for KMean<MaxAttempt<ATTEMPTS>>
+{
+    fn split<'a>(
+        target: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+        _graph: &'a IntraPartitionGraph<A>,
+    ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] {
+        let centroid = target.centroid();
+        let mut distances_1 = target
+            .iter()
+            .map(|vector| B::dist(&centroid, &vector.vector))
+            .enumerate()
+            .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
+            .collect::<Vec<KeyValuePair<usize, A>>>();
+
+        if distances_1.is_empty() {
+            todo!()
+        }
+
+        distances_1.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(Ordering::Equal));
+
+        // maybe try distance matrix to maximize distance between starting vectors
+        for i1 in 0..distances_1.len() {
+            let ref_vec_1 = distances_1[i1].0;
+
+            let mut distances_2 = {
+                let vec_1 = target[ref_vec_1];
+                target
+                    .iter()
+                    .skip(i1)
+                    .map(|vector| B::dist(&vec_1.vector, &vector.vector))
+                    .enumerate()
+                    .map(|(index, dist)| KeyValuePair(index, Reverse(dist)))
+                    .collect::<Vec<KeyValuePair<usize, A>>>()
+            };
+            distances_2.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(Ordering::Equal));
+
+            if distances_2.is_empty() {
+                todo!()
+            }
+
+            for i2 in 0..distances_2.len() {
+                let ref_vec_2 = distances_2[i2].0;
+                if i1 == i2 {
+                    continue;
+                    // panic!("End of list - attempted all possible solutions")
+                }
+                let mut prev_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+                    SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
+                let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+                    SPLITS] = [
+                    {
+                        let mut tmp = PartitionSubSet::new(&target);
+
+                        tmp.add(ref_vec_1).unwrap();
+
+                        tmp
+                    },
+                    {
+                        let mut tmp = PartitionSubSet::new(&target);
+
+                        tmp.add(ref_vec_2).unwrap();
+
+                        tmp
+                    },
+                ];
+
+                // find closet_partition
+                let mut i1 = 0;
+                while prev_partitions
+                    .iter()
+                    .zip(new_partitions.iter())
+                    .all(|(x, y)| x.vectors != y.vectors)
+                    && i1 < ATTEMPTS
+                {
+                    i1 += 1;
                     mem::swap(&mut prev_partitions, &mut new_partitions);
 
                     new_partitions.iter_mut().for_each(|x| x.clear());
@@ -439,6 +564,8 @@ impl<
         partition: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         graph: &'a IntraPartitionGraph<A>,
     ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] {
+        println!("Tree split");
+
         let mut visited_nodes: HashSet<&VectorId> = HashSet::new();
         let mut first_tree_subset = PartitionSubSet::new(partition);
         let mut remaining_points_subset = PartitionSubSet::new(partition);
@@ -496,7 +623,7 @@ impl<
 // testable
 pub fn split_partition<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
-    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
+    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes + Debug,
     S: SplitStrategy<A, B, PARTITION_CAP, VECTOR_CAP>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
@@ -519,21 +646,29 @@ pub fn split_partition<
     if target.size < SPLITS {
         return Err(PartitionErr::InsufficientSizeForSplits);
     }
+    event!(
+        Level::DEBUG,
+        "Split {:?} using {}",
+        target.id,
+        std::any::type_name::<S>()
+    );
 
     let new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] =
-        match target.size == SPLITS {
-            true => {
-                let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
-                    SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
+        S::split(&target, &intra_graph);
+    // match target.size == SPLITS {
+    //     true => {
+    //         let mut new_partitions: [PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP>;
+    //             SPLITS] = array::from_fn(|_| PartitionSubSet::new(&target));
 
-                target.iter().enumerate().for_each(|(idx, _)| {
-                    let _ = new_partitions[idx].add(idx).unwrap();
-                });
+    //         target.iter().enumerate().for_each(|(idx, _)| {
+    //             let _ = new_partitions[idx].add(idx).unwrap();
+    //         });
+    //         new_partitions[0].id = target.id;
 
-                new_partitions
-            }
-            false => S::split(&target, &intra_graph),
-        };
+    //         new_partitions
+    //     }
+    //     false => S::split(&target, &intra_graph),
+    // };
 
     let partition_membership: HashMap<VectorId, usize> = new_partitions
         .iter()
@@ -551,7 +686,8 @@ pub fn split_partition<
         .collect();
     let mut intra_graphs = {
         let mut intra_graphs: [IntraPartitionGraph<A>; 2] = array::from_fn(|i1| {
-            let x = new_partitions.get(i1).unwrap();
+            let x: &PartitionSubSet<'_, A, B, PARTITION_CAP, VECTOR_CAP> =
+                new_partitions.get(i1).unwrap();
             IntraPartitionGraph::new(PartitionId(x.id))
         });
         // (0..(splits)).map(|_| IntraPartitionGraph::new()).collect();
@@ -597,46 +733,88 @@ pub fn split_partition<
                 };
             });
 
-        intra_graphs.iter().skip(1).for_each(|graph| {
-            inter_graph.add_node(graph.2);
-        });
+        println!(
+            "{:?}\ntarget - PartitionId({:?})",
+            intra_graphs.iter().map(|x| x.2).collect::<Vec<_>>(),
+            target.id
+        );
+        intra_graphs
+            .iter()
+            // .skip(1)
+            .filter(|graph| {
+                !inter_graph.1.contains_key(&graph.2) && graph.2 != PartitionId(target.id)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|graph| {
+                inter_graph.add_node(graph.2);
+            });
 
         let update_inter_edges: Vec<_> = inter_graph
             .0
             .edges(inter_graph.1[&PartitionId(target.id)])
-            .map(|edge| (edge.id(), edge.weight()))
-            .filter_map(|(idx, (dist, id_1, id_2))| {
-                match (
-                    (
-                        id_1.0 == intra_graphs[0].2,
-                        partition_membership.get(&id_1.1),
-                    ),
-                    (
-                        id_2.0 == intra_graphs[0].2,
-                        partition_membership.get(&id_2.1),
-                    ),
-                ) {
-                    // Need to redo this for better updating
-                    ((true, Some(0) | None), (false, _)) => None,
-                    ((true | false, Some(n)), (false, _)) => {
-                        Some((idx, (*dist, (intra_graphs[*n].2, id_1.1), *id_2)))
+            .map(|edge| edge.weight())
+            .map(
+                |(dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2))| {
+                    match partition_id_1 == &PartitionId(target.id) {
+                        true => (
+                            dist,
+                            (partition_id_1, vector_id_1),
+                            (partition_id_2, vector_id_2),
+                        ),
+                        false => (
+                            dist,
+                            (partition_id_2, vector_id_2),
+                            (partition_id_1, vector_id_1),
+                        ),
                     }
-                    // ((false, Some(n)), _) => {
-                    //     Some((idx, (*dist, (intra_graphs[*n].2, id_1.1), *id_2))) // maybe need to verify
-                    // }
-                    ((false, _), (true, Some(0) | None)) => None,
-                    ((false, _), (true | false, Some(n))) => {
-                        Some((idx, (*dist, *id_1, (intra_graphs[*n].2, id_2.1))))
-                    }
-
-                    edge_case => panic!("Edge case not accounted for {edge_case:?}"),
-                }
-            })
+                },
+            )
+            // .filter(
+            //     |(dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2))| {
+            //         match partition_membership.get(&vector_id_1) {
+            //             Some(0) => false,
+            //             Some(_) => true,
+            //             None => panic!(
+            //             "{vector_id_1:?} not in {partition_membership:#?}\n{:#?}\n{:#?}\n{:#?}\n{:#?}",
+            //             (new_partitions[0].vectors, intra_graphs[0].2),
+            //             (new_partitions[1].vectors, intra_graphs[1].2),
+            //             target.vectors,
+            //             inter_graph
+            //                 .0
+            //                 .edges(inter_graph.1[&PartitionId(target.id)])
+            //                 .map(|edge| edge.weight())
+            //                 .collect::<Vec<_>>()
+            //         ),
+            //         }
+            //     },
+            // )
+            .map(
+                |(dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2))| {
+                    (
+                        (
+                            (*partition_id_1, *vector_id_1),
+                            (*partition_id_2, *vector_id_2),
+                        ),
+                        (
+                            *dist,
+                            (
+                                intra_graphs[*partition_membership.get(vector_id_1).unwrap()].2,
+                                *vector_id_1,
+                            ),
+                            (*partition_id_2, *vector_id_2),
+                        ),
+                    )
+                },
+            )
             .collect();
 
-        for (idx, (dist, id_1, id_2)) in update_inter_edges {
-            inter_graph.0.remove_edge(idx);
+        for ((remove_id_1, remove_id_2), (dist, id_1, id_2)) in update_inter_edges {
+            let _ = inter_graph.remove_edge(remove_id_1, remove_id_2).unwrap();
             inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
+            // todo!() save idx like last time for faster deletion
+            // inter_graph.0.remove_edge(idx);
+            // inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
         }
 
         new_inter_edges
@@ -656,59 +834,6 @@ pub fn split_partition<
                     )
                 },
             )
-            .chain({
-                // update inter_edges that uses to connect to target partition
-
-                // need to split so we can first borrow read and then mut borrow for deletion
-                let mut delete_edges = Vec::new();
-                let update_edges: Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)> =
-                    inter_graph
-                        .0
-                        .edges(inter_graph.1[&PartitionId(new_partitions[0].id)])
-                        .map(|edge| (edge.id(), edge.weight()))
-                        .filter_map(|(id, (dist, (partition_1, vec_1), (partition_2, vec_2)))| {
-                            // foreign vec
-                            match (
-                                **partition_1 == target.id,
-                                (partition_1, vec_1),
-                                (partition_2, vec_2),
-                            ) {
-                                (true, (_, target_vec), other_vec)
-                                | (false, other_vec, (_, target_vec)) => {
-                                    if intra_graphs[0].1.contains_key(target_vec) {
-                                        Some((
-                                            id,
-                                            dist,
-                                            (
-                                                PartitionId(
-                                                    new_partitions
-                                                        [partition_membership[target_vec]]
-                                                        .id,
-                                                ),
-                                                *target_vec,
-                                            ),
-                                            (*other_vec.0, *other_vec.1),
-                                        ))
-                                    } else {
-                                        None
-                                    }
-                                }
-                            }
-                        })
-                        .map(|(delete_index, dist, source, target)| {
-                            // add to delete_edge list
-                            delete_edges.push(delete_index);
-                            // add to update edge
-                            (source, target, *dist)
-                        })
-                        .collect();
-
-                delete_edges.into_iter().for_each(|edge_index| {
-                    inter_graph.0.remove_edge(edge_index);
-                });
-
-                update_edges.into_iter()
-            })
             .for_each(|(id_1, id_2, dist)| {
                 inter_graph.add_edge(id_1.0, id_2.0, (dist, id_1, id_2));
             });
@@ -735,6 +860,16 @@ pub fn split_partition<
     let i1 = result.len() - 1;
     result.swap(0, i1);
 
+    event!(
+        Level::DEBUG,
+        "Finished split {:?} using {} into {:?}",
+        target.id,
+        std::any::type_name::<S>(),
+        result
+            .iter()
+            .map(|pair| (pair.0.id, pair.0.size))
+            .collect::<Vec<_>>()
+    );
     Ok(result)
 }
 
@@ -764,7 +899,7 @@ pub fn calculate_number_of_trees<A: Field<A> + Debug>(graph: &IntraPartitionGrap
 }
 pub fn split_partition_into_trees<
     A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
-    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
+    B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes + Debug,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
 >(
@@ -1181,7 +1316,7 @@ mod tests {
             ),
         ];
 
-        split_partition_test::<KMean>(vectors.clone(), edges.clone());
+        split_partition_test::<KMean<Stable>>(vectors.clone(), edges.clone());
     }
 
     #[test]

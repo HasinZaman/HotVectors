@@ -23,7 +23,7 @@ use crate::{
         cluster::ClusterSet,
         data_buffer::DataBuffer,
         graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
-        ids::PartitionId,
+        ids::{PartitionId, VectorId},
         meta::Meta,
     },
     vector::{Field, VectorSpace},
@@ -301,6 +301,27 @@ fn build_larger_clusters_from_nearest_cluster() {
     todo!()
 }
 
-pub fn update_cluster() {
-    todo!()
+pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone>(
+    cluster_sets: &mut Vec<ClusterSet<A>>,
+    dist: &A,
+    id_1: VectorId,
+    id_2: VectorId,
+) {
+    for cluster_set in cluster_sets.iter_mut() {
+        if &cluster_set.threshold < dist {
+            continue;
+        }
+
+        let cluster_id_1 = cluster_set.get_cluster(id_1).await.unwrap();
+        let cluster_id_2 = cluster_set.get_cluster(id_2).await.unwrap();
+
+        if cluster_id_1 == cluster_id_2 {
+            continue;
+        }
+
+        let _ = cluster_set
+            .merge_clusters(cluster_id_1, cluster_id_2)
+            .await
+            .unwrap();
+    }
 }

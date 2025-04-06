@@ -290,8 +290,14 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
         node_2: PartitionId,
         weight: (A, (PartitionId, VectorId), (PartitionId, VectorId)),
     ) {
-        let idx_1 = self.1[&node_1];
-        let idx_2 = self.1[&node_2];
+        let idx_1 = *self
+            .1
+            .get(&node_1)
+            .expect(&format!("Expect {node_1:?} to be in {:?}", self.1));
+        let idx_2 = *self
+            .1
+            .get(&node_2)
+            .expect(&format!("Expect {node_2:?} to be in {:?}", self.1));
         self.0.add_edge(idx_1, idx_2, weight);
     }
 
@@ -338,34 +344,38 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
         let mut visited_partitions: HashSet<PartitionId> = HashSet::new();
         visited_partitions.insert(from);
 
-        let mut search_queue: Vec<(A, Vec<(PartitionId, VectorId)>)> = self
+        let mut search_queue: VecDeque<(A, Vec<(PartitionId, VectorId)>)> = self
             .0
             .edges(self.1[&from])
-            .filter(|edge_ref| {
-                !visited_partitions.contains(&self.0.node_weight(edge_ref.source()).unwrap())
-            })
-            .filter(|edge_ref| {
-                !visited_partitions.contains(&self.0.node_weight(edge_ref.target()).unwrap())
-            })
+            // .filter(|edge_ref| {
+            //     !visited_partitions.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+            // })
+            // .filter(|edge_ref| {
+            //     !visited_partitions.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+            // })
             .map(|edge_ref| {
                 let (weight, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2)) =
                     edge_ref.weight();
                 let path = match partition_id_1 == &from {
-                    true => vec![(*partition_id_1, *vector_id_1), (*partition_id_2, *vector_id_2)],
-                    false => vec![(*partition_id_2, *vector_id_2), (*partition_id_1, *vector_id_1)],
+                    true => vec![
+                        (*partition_id_1, *vector_id_1),
+                        (*partition_id_2, *vector_id_2),
+                    ],
+                    false => vec![
+                        (*partition_id_2, *vector_id_2),
+                        (*partition_id_1, *vector_id_1),
+                    ],
                 };
                 (weight.clone(), path)
             })
             .collect();
 
-        while let Some((current_weight, current_path)) = search_queue.pop() {
+        while let Some((current_weight, current_path)) = search_queue.pop_front() {
             let (partition_id, _vector_id) = current_path.last().unwrap();
 
             if partition_id == &to {
                 return Ok(Some((current_weight, current_path)));
             }
-
-            visited_partitions.insert(*partition_id);
 
             self.0
                 .edges(self.1[&partition_id])
@@ -388,8 +398,77 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
                     new_path.push(next_node);
                     let new_weight = A::add(&current_weight, weight);
 
-                    search_queue.push((new_weight, new_path));
+                    search_queue.push_back((new_weight, new_path));
                 });
+            visited_partitions.insert(*partition_id);
+        }
+
+        Ok(None)
+    }
+
+    pub fn find_trail(
+        &self,
+        from: PartitionId,
+        to: PartitionId,
+    ) -> Result<
+        Option<(
+            A,
+            Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)>,
+        )>,
+        (),
+    > {
+        if !self.1.contains_key(&from) || !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_partitions: HashSet<PartitionId> = HashSet::new();
+        visited_partitions.insert(from);
+
+        let mut search_queue: VecDeque<(
+            A,
+            Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)>,
+        )> = self
+            .0
+            .edges(self.1[&from])
+            .map(|edge_ref| {
+                let (weight, node_1, node_2) = edge_ref.weight();
+                let edge = match node_1.0 == from {
+                    true => (*node_1, *node_2, weight.clone()),
+                    false => (*node_2, *node_1, weight.clone()),
+                };
+                (weight.clone(), vec![edge])
+            })
+            .collect();
+
+        while let Some((current_weight, current_trail)) = search_queue.pop_front() {
+            let (last_partition, _last_vector) = current_trail.last().unwrap().1;
+
+            if last_partition == to {
+                return Ok(Some((current_weight, current_trail)));
+            }
+
+            self.0
+                .edges(self.1[&last_partition])
+                .filter(|edge_ref| {
+                    !visited_partitions.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                })
+                .filter(|edge_ref| {
+                    !visited_partitions.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                })
+                .for_each(|edge_ref| {
+                    let (weight, node_1, node_2) = edge_ref.weight();
+
+                    let new_edge = match node_1.0 == last_partition {
+                        true => (*node_1, *node_2, weight.clone()),
+                        false => (*node_2, *node_1, weight.clone()),
+                    };
+                    let mut new_trail = current_trail.clone();
+                    new_trail.push(new_edge);
+
+                    let new_weight = A::add(&current_weight, weight);
+                    search_queue.push_back((new_weight, new_trail));
+                });
+            visited_partitions.insert(last_partition);
         }
 
         Ok(None)
@@ -533,15 +612,15 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
         let mut visited_vectors: HashSet<VectorId> = HashSet::new();
         visited_vectors.insert(from);
 
-        let mut search_queue: Vec<(Vec<VectorId>, A)> = self
+        let mut search_queue: VecDeque<(Vec<VectorId>, A)> = self
             .0
             .edges(self.1[&from])
-            .filter(|edge_ref| {
-                !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
-            })
-            .filter(|edge_ref| {
-                !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
-            })
+            // .filter(|edge_ref| {
+            //     !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+            // })
+            // .filter(|edge_ref| {
+            //     !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+            // })
             .map(|edge_ref| {
                 let weight = edge_ref.weight().clone();
                 let (vector_id_1, vector_id_2) = (
@@ -557,7 +636,7 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
             .collect();
 
         while !search_queue.is_empty() {
-            let (current_path, current_weight) = search_queue.pop().unwrap();
+            let (current_path, current_weight) = search_queue.pop_front().unwrap();
 
             let vector_id = current_path.last().unwrap();
 
@@ -565,16 +644,14 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
                 return Ok(Some((current_weight, current_path)));
             }
 
-            visited_vectors.insert(*vector_id);
-
             self.0
                 .edges(self.1[&vector_id])
-                .filter(|edge_ref| {
-                    !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
-                })
-                .filter(|edge_ref| {
-                    !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
-                })
+                // .filter(|edge_ref| {
+                //     !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                // })
+                // .filter(|edge_ref| {
+                //     !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                // })
                 .for_each(|edge_ref| {
                     let weight = edge_ref.weight();
                     let (vector_id_1, vector_id_2) = (
@@ -590,8 +667,81 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
                     new_path.push(next_node);
                     let new_weight = A::add(&current_weight, weight);
 
-                    search_queue.push((new_path, new_weight));
+                    search_queue.push_back((new_path, new_weight));
                 });
+
+            visited_vectors.insert(*vector_id);
+        }
+
+        Ok(None)
+    }
+
+    pub fn find_trail(
+        &self,
+        from: VectorId,
+        to: VectorId,
+    ) -> Result<Option<(A, Vec<(VectorId, VectorId, A)>)>, ()> {
+        if !self.1.contains_key(&from) || !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_vectors: HashSet<VectorId> = HashSet::new();
+        visited_vectors.insert(from);
+
+        let mut search_queue: VecDeque<(A, Vec<(VectorId, VectorId, A)>)> = self
+            .0
+            .edges(self.1[&from])
+            .map(|edge_ref| {
+                let weight = edge_ref.weight().clone();
+                let (vector_id_1, vector_id_2) = (
+                    *self.0.node_weight(edge_ref.source()).unwrap(),
+                    *self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+
+                let edge = match vector_id_1 == from {
+                    true => (vector_id_1, vector_id_2, weight.clone()),
+                    false => (vector_id_2, vector_id_1, weight.clone()),
+                };
+                (weight, vec![edge])
+            })
+            .collect();
+
+        while let Some((current_weight, current_trail)) = search_queue.pop_front() {
+            let (_, last_vector, _) = current_trail.last().unwrap();
+
+            if last_vector == &to {
+                return Ok(Some((current_weight, current_trail)));
+            }
+
+            self.0
+                .edges(self.1[&last_vector])
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                })
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                })
+                .for_each(|edge_ref| {
+                    let weight = edge_ref.weight();
+                    let (vector_id_1, vector_id_2) = (
+                        *self.0.node_weight(edge_ref.source()).unwrap(),
+                        *self.0.node_weight(edge_ref.target()).unwrap(),
+                    );
+
+                    let next_node = if vector_id_1 == *last_vector {
+                        vector_id_2
+                    } else {
+                        vector_id_1
+                    };
+
+                    let new_edge = (*last_vector, next_node, weight.clone());
+                    let mut new_trail = current_trail.clone();
+                    new_trail.push(new_edge);
+
+                    let new_weight = A::add(&current_weight, weight);
+                    search_queue.push_back((new_weight, new_trail));
+                });
+            visited_vectors.insert(*last_vector);
         }
 
         Ok(None)

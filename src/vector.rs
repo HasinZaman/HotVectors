@@ -1,6 +1,7 @@
 use std::{array, fmt::Debug};
 
 use rkyv::{Archive, Deserialize, Serialize};
+use spade::{HasPosition, Point2, SpadeNum};
 
 pub trait Extremes {
     fn min() -> Self;
@@ -67,6 +68,31 @@ impl<A: PartialEq + Clone + Copy + Field<A>, const CAP: usize> VectorSpace<A> fo
         Vector(array::from_fn(|_| iter.next().unwrap()))
     }
 }
+
+impl<A: PartialEq + Clone + Copy + Field<A> + Into<f32>> HasPosition for Vector<A, 2> {
+    type Scalar = f32;
+
+    fn position(&self) -> Point2<Self::Scalar> {
+        Point2 {
+            x: self.0[0].into(),
+            y: self.0[1].into(),
+        }
+    }
+}
+// impl HasPosition for Vector<f32, 2> {
+//     type Scalar = f32;
+
+//     fn position(&self) -> Point2<Self::Scalar> {
+//         Point2 { x: self.0[0], y: self.0[1] }
+//     }
+// }
+// impl HasPosition for Vector<f64, 2> {
+//     type Scalar = f64;
+
+//     fn position(&self) -> Point2<Self::Scalar> {
+//         Point2 { x: self.0[0], y: self.0[1] }
+//     }
+// }
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 pub struct VectorSerial<A: Clone + Copy>(pub Vec<A>);
