@@ -638,7 +638,8 @@ where
                     .insert(*vector_id);
             }
 
-            let mut missing_partitions = [closet_partition_id].into_iter()
+            let mut missing_partitions = [closet_partition_id]
+                .into_iter()
                 .into_iter()
                 .chain(neighbor_ids.clone())
                 .collect::<HashSet<_>>();
@@ -787,495 +788,640 @@ where
             break 'update_min_span;
         }
 
-        let mut ordered_edges: Vec<(VectorId, A)> = {
-            let mut ordered_edges: Vec<(VectorId, A)> = dist_map
-                .into_iter()
-                .filter(|(VectorId(id), _)| id != &value.id)
-                .collect();
+        // let mut ordered_edges: Vec<(VectorId, A)> = {
+        //     let mut ordered_edges: Vec<(VectorId, A)> = dist_map
+        //         .into_iter()
+        //         .filter(|(VectorId(id), _)| id != &value.id)
+        //         .collect();
 
-            ordered_edges.sort_by(|(_, x), (_, y)| y.partial_cmp(x).unwrap_or(Ordering::Equal));
+        //     ordered_edges.sort_by(|(_, x), (_, y)| y.partial_cmp(x).unwrap_or(Ordering::Equal));
 
-            ordered_edges
-        };
+        //     ordered_edges
+        // };
 
         let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
-        // add node to closet tree
+        // // add node to closet tree
+        // {
+        //     let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
+        //         resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+
+        //     let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //         todo!()
+        //     };
+
+        //     min_span_tree.add_node(VectorId(value.id));
+
+        //     let remove_index: usize = 'remove_index: {
+        //         for i in 0..ordered_edges.len() {
+        //             let i = ordered_edges.len() - i - 1;
+
+        //             let (vector_id, weight) = ordered_edges[i];
+
+        //             if vec_to_partition[&vector_id] != closet_partition_id {
+        //                 continue;
+        //             }
+
+        //             event!(Level::DEBUG, "({vector_id:?}, {weight:?})");
+        //             event!(Level::DEBUG, "({closet_partition_id:?})");
+
+        //             min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
+
+        //             update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
+
+        //             break 'remove_index i;
+        //         }
+
+        //         panic!()
+        //     };
+
+        //     ordered_edges.remove(remove_index);
+        // }
+
+        let partition_buffer = &mut *w_partition_buffer;
+        // Update closest partition edges
         {
-            let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
-                resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+            let min_span_tree = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
 
             let Some(min_span_tree) = &mut *min_span_tree.write().await else {
                 todo!()
             };
 
+        //     let vector_iter = min_span_tree.1.iter().map(|(x, _)| *x).collect::<Vec<_>>();
+        //     let mut vector_iter = vector_iter.into_iter();
+
+        //     // Add first edge
+        //     min_span_tree.add_node(VectorId(value.id));
+
+        //     if let Some(vector_id) = vector_iter.next() {
+        //         min_span_tree.add_edge(
+        //             VectorId(value.id),
+        //             vector_id,
+        //             *dist_map.get(&vector_id).expect(""),
+        //         );
+        //     }
+
+        //     let mut hashset: HashSet<_> = vector_iter.collect();
+
+        //     while !hashset.is_empty() {
+        //         let start_vector = *hashset.iter().next().unwrap();
+        //         hashset.remove(&start_vector);
+
+        //         let (_, mut edges) = min_span_tree
+        //             .find_trail(start_vector, VectorId(value.id))
+        //             .ok()
+        //             .flatten()
+        //             .unwrap();
+
+        //         // Sort by max value at the end
+        //         edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+        //         let mut candidate_new_edges: Vec<_> = edges
+        //             .iter()
+        //             .map(|(vector_id_1, _, _)| vector_id_1)
+        //             .filter(|vector_id| vector_id != &&VectorId(value.id))
+        //             // .filter(|(vector_id, _, _)| *vector_id != VectorId(value.id))
+        //             .map(|vector_id| (*vector_id, *dist_map.get(&vector_id).expect("")))
+        //             .collect();
+
+        //         // Sort by min value at the end
+        //         candidate_new_edges.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+                
+        //         println!("{:?}", edges);
+        //         println!("{:?}", candidate_new_edges);
+
+        //         while let Some((max_vector_id_1, max_vector_id_2, max_weight)) = edges.pop() {
+        //             let Some((min_vector, min_weight)) = candidate_new_edges.pop() else {
+        //                 break;
+        //             };
+
+        //             if min_weight > max_weight {
+        //                 edges.iter().for_each(|(vector_id_1, vector_id_2, _)| {
+        //                     hashset.remove(vector_id_1);
+        //                     hashset.remove(vector_id_2);
+        //                 });
+        //                 break;
+        //             }
+
+        //             min_span_tree
+        //                 .remove_edge(max_vector_id_1, max_vector_id_2)
+        //                 .unwrap();
+
+        //             min_span_tree.add_edge(VectorId(value.id), min_vector, min_weight);
+
+        //             update_cluster(cluster_sets, &min_weight, VectorId(value.id), min_vector).await;
+
+        //             hashset.remove(&min_vector);
+        //         }
+        //     }
+
+            let vector_iter = min_span_tree.1.iter().map(|(x,_)| *x).collect::<Vec<_>>();
+            let mut vector_iter = vector_iter.iter();
+
+            // first edge
             min_span_tree.add_node(VectorId(value.id));
 
-            let remove_index: usize = 'remove_index: {
-                for i in 0..ordered_edges.len() {
-                    let i = ordered_edges.len() - i - 1;
+            min_span_tree.add_node(VectorId(value.id));
+            match vector_iter.next() {
+                Some(vector_id) => {
+                    min_span_tree.add_edge(
+                        VectorId(value.id),
+                        *vector_id,
+                        *dist_map.get(vector_id).expect("")
+                    );
+                },
+                None => todo!()
+            }
 
-                    let (vector_id, weight) = ordered_edges[i];
-
-                    if vec_to_partition[&vector_id] != closet_partition_id {
-                        continue;
-                    }
-
-                    event!(Level::DEBUG, "({vector_id:?}, {weight:?})");
-                    event!(Level::DEBUG, "({closet_partition_id:?})");
-
-                    min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
-
-                    update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
-
-                    break 'remove_index i;
-                }
-
-                panic!()
-            };
-
-            ordered_edges.remove(remove_index);
-        }
-
-        // add or filter remaining edges
-        let mut partition_trail_cache: HashMap<
-            PartitionId,
-            HashMap<(VectorId, VectorId), Vec<(VectorId, VectorId, A)>>,
-        > = HashMap::new();
-        'ordered_edges_loop: while let Some((vector_id, weight)) = ordered_edges.pop() {
-            let partition_id = vec_to_partition.get(&vector_id).unwrap();
-
-            match partition_id == &closet_partition_id {
-                true => {
-                    let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
-                        resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id);
-
-                    let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                        todo!()
-                    };
-                    event!(Level::DEBUG, "{:?} -> {:?}", vector_id, VectorId(value.id));
+            //  -> replace loop with while hashset.is_empty() & for loop for a trail
+            // while iterating through trail (add and remove edges based on deleting or adding edges)
+            //  This would reduce # of times trails are calculated
+            //      Current O(vectors*(BFS)) = O(|V|^2+|V|*|E|))
+            //      Proposed solution: O(|T|*(BFS)) = O(|T|*|V|+|V|*|E|))
+            //      note: |T| := # of searched trails
+            //      |T| < |V|, therefore O(|T|*(BFS)) < O(vectors*(BFS))
+            //      set(V(t1))+...+set(V(tn)) = vectors, aka all vectors will be searched
+            for vector_id in vector_iter {
+                let weight = *dist_map.get(vector_id).expect("");
+                event!(Level::DEBUG, "{:?} -> {:?}", vector_id, VectorId(value.id));
+                let Ok(path) = min_span_tree.find_trail(*vector_id, VectorId(value.id)) else {
                     event!(
                         Level::DEBUG,
-                        "{:?} === {:?}",
-                        partition_id,
-                        closet_partition_id
+                        "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?}",
+                        vector_id,
+                        VectorId(value.id)
                     );
-                    event!(Level::DEBUG, "{:#?}", min_span_tree);
-                    let Ok(path) = min_span_tree.find_trail(vector_id, VectorId(value.id)) else {
-                        event!(
-                            Level::DEBUG,
-                            "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?}",
-                            vector_id,
-                            VectorId(value.id)
-                        );
-                        // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
-                        todo!()
-                    };
+                    // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
+                    todo!()
+                };
+                let Some((_, path)) = path else { todo!() };
 
-                    let Some((_, path)) = path else { todo!() };
-
-                    let (max_vector_id_1, max_vector_id_2, max_weight) = path.into_iter().fold(
-                        (VectorId(Uuid::nil()), VectorId(Uuid::nil()), A::min()),
-                        |(acc_id_1, acc_id_2, acc_weight), (next_id_1, next_id_2, next_weight)| {
-                            match next_weight.partial_cmp(&acc_weight) {
-                                Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
-                                _ => (acc_id_1, acc_id_2, acc_weight),
-                            }
-                        },
-                    );
-
-                    if weight.partial_cmp(&max_weight) == Some(Ordering::Greater)
-                        || weight.partial_cmp(&max_weight) == Some(Ordering::Equal)
-                    {
-                        continue;
-                    };
-
-                    let _ = min_span_tree
-                        .remove_edge(max_vector_id_1, max_vector_id_2)
-                        .unwrap();
-
-                    min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
-
-                    update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
-                }
-                false => {
-                    // get partition trail
-                    let Ok(partition_trail) =
-                        inter_graph.find_trail(closet_partition_id, *partition_id)
-                    else {
-                        todo!()
-                        // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
-                    };
-
-                    let Some((_, partition_trail)) = partition_trail else {
-                        panic!("Failed to find partition trail from {closet_partition_id:?} -> {partition_id:?}\n{inter_graph:#?}");
-                        todo!()
-                    };
-
-                    event!(Level::DEBUG, "partition_trail:\n{partition_trail:?}");
-                    // find trail
-                    let trails = {
-                        let mut trails: Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)> = 'initialize_trail: {
-                            let inter_edge = partition_trail[0];
-
-                            if VectorId(value.id) == inter_edge.0 .1 {
-                                break 'initialize_trail vec![inter_edge];
-                            }
-                            let min_span_tree =
-                                resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
-
-                            let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                                todo!()
-                            };
-
-                            let Ok(trail) =
-                                min_span_tree.find_trail(VectorId(value.id), inter_edge.0 .1)
-                            else {
-                                todo!()
-                                // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
-                            };
-
-                            let Some(trail) = trail else {
-                                event!(
-                                    Level::DEBUG,
-                                    "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?} => {:?} == {:?}",
-                                    VectorId(value.id),
-                                    inter_edge.0 .1,
-                                    inter_edge.1,
-                                    vec_to_partition[&inter_edge.0 .1]
-                                );
-                                todo!()
-                            };
-
-                            trail
-                                .1
-                                .into_iter()
-                                .map(|(vector_id_1, vector_id_2, weight)| {
-                                    (
-                                        (closet_partition_id, vector_id_1),
-                                        (closet_partition_id, vector_id_2),
-                                        weight,
-                                    )
-                                })
-                                .chain(vec![inter_edge].into_iter())
-                                .collect()
-                        };
-
-                        for i in 1..partition_trail.len() {
-                            let (_, (partition_id_1, vector_id_1), _) = partition_trail[i - 1];
-                            let (
-                                (partition_id_2, vector_id_2),
-                                (partition_id_3, vector_id_3),
-                                edge_2_weight,
-                            ) = partition_trail[i];
-
-                            if vector_id_1 == vector_id_2 {
-                                trails.push((
-                                    (partition_id_2, vector_id_2),
-                                    (partition_id_3, vector_id_3),
-                                    edge_2_weight,
-                                ));
-                                continue;
-                            }
-
-                            if !partition_trail_cache.contains_key(&partition_id_1)
-                                || !partition_trail_cache[&partition_id_1]
-                                    .contains_key(&(vector_id_1, vector_id_2))
-                            {
-                                let min_span_tree =
-                                    resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id_1);
-
-                                let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                                    todo!()
-                                };
-
-                                let Ok(trail) = min_span_tree.find_trail(vector_id_1, vector_id_2)
-                                else {
-                                    event!(
-                                        Level::DEBUG,
-                                        "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?} => {:?}",
-                                        VectorId(value.id),
-                                        (partition_id_2, vector_id_2),
-                                        (partition_id_3, vector_id_3)
-                                    );
-                                    todo!()
-                                    // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
-                                };
-
-                                let Some(trail) = trail else { todo!() };
-
-                                if !partition_trail_cache.contains_key(&partition_id_1) {
-                                    partition_trail_cache.insert(partition_id_1, HashMap::new());
-                                }
-                                partition_trail_cache
-                                    .get_mut(&partition_id_1)
-                                    .unwrap()
-                                    .insert((vector_id_1, vector_id_2), trail.1);
-                            }
-
-                            let trail: Vec<_> = partition_trail_cache[&partition_id_1]
-                                [&(vector_id_1, vector_id_2)]
-                                .iter()
-                                .map(|(vector_id_1, vector_id_2, weight)| {
-                                    (
-                                        (partition_id_1, *vector_id_1),
-                                        (partition_id_1, *vector_id_2),
-                                        *weight,
-                                    )
-                                })
-                                .chain(
-                                    vec![(
-                                        (partition_id_2, vector_id_2),
-                                        (partition_id_3, vector_id_3),
-                                        edge_2_weight,
-                                    )]
-                                    .into_iter(),
-                                )
-                                .collect();
-
-                            trails.extend(trail)
+                let (max_vector_id_1, max_vector_id_2, max_weight) = path.into_iter().fold(
+                    (VectorId(Uuid::nil()), VectorId(Uuid::nil()), A::min()),
+                    |(acc_id_1, acc_id_2, acc_weight), (next_id_1, next_id_2, next_weight)| {
+                        match next_weight.partial_cmp(&acc_weight) {
+                            Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
+                            _ => (acc_id_1, acc_id_2, acc_weight),
                         }
+                    },
+                );
 
-                        'final_trail: {
-                            // if partition_trail.len() == 1 {
-                            //     break 'final_trail;
-                            // }
-                            let (_, (partition_id_1, vector_id_1), _) =
-                                partition_trail.last().unwrap();
+                if weight >= max_weight {
+                    continue;
+                };
 
-                            if vector_id_1 == &vector_id {
-                                break 'final_trail;
-                            }
+                let _ = min_span_tree
+                    .remove_edge(max_vector_id_1, max_vector_id_2)
+                    .unwrap();
 
-                            let min_span_tree =
-                                resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id_1);
+                min_span_tree.add_edge(VectorId(value.id), *vector_id, weight);
 
-                            let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                                todo!()
-                            };
-                            let Ok(path) = min_span_tree.find_trail(*vector_id_1, vector_id) else {
-                                event!(
-                                    Level::DEBUG,
-                                    "Failed to find trail:\n{min_span_tree:?}\n{:?}\n{:?} => {:?}",
-                                    VectorId(value.id),
-                                    (vector_id_1, vec_to_partition[&vector_id_1]),
-                                    (vector_id, vec_to_partition[&vector_id]),
-                                );
-                                todo!()
-                            };
-                            let Some(path) = path else { todo!() };
-
-                            trails.extend(
-                                path.1
-                                    .into_iter()
-                                    .map(|(vector_id_1, vector_id_2, weight)| {
-                                        (
-                                            (*partition_id_1, vector_id_1),
-                                            (*partition_id_1, vector_id_2),
-                                            weight,
-                                        )
-                                    }), // .collect::<Vec<_>>()
-                            )
-                        };
-
-                        trails
-                    };
-
-                    event!(Level::DEBUG, "{trails:?}");
-
-                    let ((partition_id_1, vector_id_1), (partition_id_2, vector_id_2), max_weight) =
-                        trails.into_iter().fold(
-                            (
-                                (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
-                                (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
-                                A::min(),
-                            ),
-                            |(acc_id_1, acc_id_2, acc_weight),
-                             (next_id_1, next_id_2, next_weight)| {
-                                match next_weight.partial_cmp(&acc_weight) {
-                                    Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
-                                    _ => (acc_id_1, acc_id_2, acc_weight),
-                                }
-                            },
-                        );
-                    if partition_id_1 == PartitionId(Uuid::nil()) {
-                        continue;
-                    }
-                    if partition_id_2 == PartitionId(Uuid::nil()) {
-                        continue;
-                    }
-
-                    event!(
-                        Level::DEBUG,
-                        "Max edge {:?}",
-                        (
-                            (partition_id_1, vector_id_1),
-                            (partition_id_2, vector_id_2),
-                            max_weight,
-                            weight
-                        )
-                    );
-                    // if max weight < weight
-                    if weight >= max_weight {
-                        continue;
-                    };
-
-                    if partition_id_1 == partition_id_2 {
-                        let min_span_tree =
-                            resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id_1);
-
-                        let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                            todo!()
-                        };
-
-                        let _ = min_span_tree.remove_edge(vector_id_1, vector_id_2).unwrap();
-
-                        partition_trail_cache.remove(&partition_id_1);
-
-                        // split partition
-                        'split_partition: {
-                            // let min_span_tree =
-                            //     resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id);
-
-                            // let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                            //     todo!()
-                            // };
-
-                            if calculate_number_of_trees(&min_span_tree) != 2 {
-                                panic!("Removing an edge from a tree should result in two trees");
-                            }
-
-                            let partition_buffer = &mut *w_partition_buffer;
-
-                            let partition =
-                                resolve_buffer!(ACCESS, partition_buffer, partition_id_1)
-                            else {
-                                todo!()
-                            };
-                            let Some(partition) = &mut *partition.write().await else {
-                                todo!()
-                            };
-
-                            let mut pairs =
-                                split_partition_into_trees(partition, min_span_tree, inter_graph)
-                                    .unwrap();
-                            event!(Level::DEBUG, "split data: {pairs:#?}");
-
-                            // if pairs.len() != 2 {
-                            //     todo!()
-                            // }
-
-                            {
-                                let (new_partition, new_min_span_tree) = pairs.remove(0);
-
-                                if new_partition.id != *partition_id_1 {
-                                    todo!()
-                                }
-
-                                *partition = new_partition;
-                                *min_span_tree = new_min_span_tree;
-
-                                let target_meta: &mut Meta<A, B> =
-                                    &mut *meta_data[&*partition_id_1].write().await;
-
-                                target_meta.size = partition.size;
-                                target_meta.centroid = partition.centroid();
-
-                                target_meta.edge_length = (
-                                    match min_span_tree.smallest_edge() {
-                                        Some(x) => x.2,
-                                        None => A::max(),
-                                    },
-                                    match min_span_tree.largest_edge() {
-                                        Some(x) => x.2,
-                                        None => A::min(),
-                                    },
-                                );
-                            }
-
-                            for (new_partition, new_min_span_tree) in pairs {
-                                meta_data.insert(
-                                    new_partition.id,
-                                    Arc::new(RwLock::new(Meta::new(
-                                        PartitionId(new_partition.id),
-                                        new_partition.size,
-                                        new_partition.centroid(),
-                                        (
-                                            match new_min_span_tree.smallest_edge() {
-                                                Some(x) => x.2,
-                                                None => A::max(),
-                                            },
-                                            match new_min_span_tree.largest_edge() {
-                                                Some(x) => x.2,
-                                                None => A::min(),
-                                            },
-                                        ),
-                                    ))),
-                                );
-
-                                new_partition.iter().for_each(|vector_entry| {
-                                    if vector_entry.id == value.id {
-                                        closet_partition_id = PartitionId(new_partition.id)
-                                    }
-
-                                    vec_to_partition.insert(
-                                        VectorId(vector_entry.id),
-                                        PartitionId(new_partition.id),
-                                    );
-                                });
-
-                                resolve_buffer!(
-                                    PUSH,
-                                    partition_buffer,
-                                    new_partition,
-                                    [*partition_id_1, partition.id]
-                                );
-                                resolve_buffer!(
-                                    PUSH,
-                                    min_span_tree_buffer,
-                                    new_min_span_tree,
-                                    [*partition_id_1, *min_span_tree.2]
-                                );
-                            }
-                        };
-                    } else {
-                        partition_trail_cache.remove(&partition_id_1);
-                        partition_trail_cache.remove(&partition_id_2);
-                        let _ = inter_graph
-                            .remove_edge(
-                                (partition_id_1, vector_id_1),
-                                (partition_id_2, vector_id_2),
-                            )
-                            .unwrap();
-                    }
-
-                    // add new inter_edge
-                    if vec_to_partition[&vector_id] == closet_partition_id {
-                        let min_span_tree =
-                            resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
-
-                        let Some(min_span_tree) = &mut *min_span_tree.write().await else {
-                            todo!()
-                        };
-
-                        let _ = min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
-
-                        update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
-                    } else {
-                        inter_graph.add_edge(
-                            vec_to_partition[&vector_id],
-                            closet_partition_id,
-                            (
-                                weight,
-                                (vec_to_partition[&vector_id], vector_id),
-                                (closet_partition_id, VectorId(value.id)),
-                            ),
-                        );
-                        update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
-                    }
-                }
+                update_cluster(cluster_sets, &weight, VectorId(value.id), *vector_id).await;
             }
         }
+
+        // update foreign edges (update delaunay triangulation to shrink search area)
+
+        // // add or filter remaining edges
+        // let mut partition_trail_cache: HashMap<
+        //     PartitionId,
+        //     HashMap<(VectorId, VectorId), Vec<(VectorId, VectorId, A)>>,
+        // > = HashMap::new();
+        // 'ordered_edges_loop: while let Some((vector_id, weight)) = ordered_edges.pop() {
+        //     let partition_id = vec_to_partition.get(&vector_id).unwrap();
+
+        //     match partition_id == &closet_partition_id {
+        //         true => {
+        //             let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
+        //                 resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id);
+
+        //             let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                 todo!()
+        //             };
+        //             event!(Level::DEBUG, "{:?} -> {:?}", vector_id, VectorId(value.id));
+        //             event!(
+        //                 Level::DEBUG,
+        //                 "{:?} === {:?}",
+        //                 partition_id,
+        //                 closet_partition_id
+        //             );
+        //             event!(Level::DEBUG, "{:#?}", min_span_tree);
+        //             let Ok(path) = min_span_tree.find_trail(vector_id, VectorId(value.id)) else {
+        //                 event!(
+        //                     Level::DEBUG,
+        //                     "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?}",
+        //                     vector_id,
+        //                     VectorId(value.id)
+        //                 );
+        //                 // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
+        //                 todo!()
+        //             };
+
+        //             let Some((_, path)) = path else { todo!() };
+
+        //             let (max_vector_id_1, max_vector_id_2, max_weight) = path.into_iter().fold(
+        //                 (VectorId(Uuid::nil()), VectorId(Uuid::nil()), A::min()),
+        //                 |(acc_id_1, acc_id_2, acc_weight), (next_id_1, next_id_2, next_weight)| {
+        //                     match next_weight.partial_cmp(&acc_weight) {
+        //                         Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
+        //                         _ => (acc_id_1, acc_id_2, acc_weight),
+        //                     }
+        //                 },
+        //             );
+
+        //             if weight.partial_cmp(&max_weight) == Some(Ordering::Greater)
+        //                 || weight.partial_cmp(&max_weight) == Some(Ordering::Equal)
+        //             {
+        //                 continue;
+        //             };
+
+        //             let _ = min_span_tree
+        //                 .remove_edge(max_vector_id_1, max_vector_id_2)
+        //                 .unwrap();
+
+        //             min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
+
+        //             update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
+        //         }
+        //         false => {
+        //             // get partition trail
+        //             let Ok(partition_trail) =
+        //                 inter_graph.find_trail(closet_partition_id, *partition_id)
+        //             else {
+        //                 todo!()
+        //                 // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
+        //             };
+
+        //             let Some((_, partition_trail)) = partition_trail else {
+        //                 panic!("Failed to find partition trail from {closet_partition_id:?} -> {partition_id:?}\n{inter_graph:#?}");
+        //                 todo!()
+        //             };
+
+        //             event!(Level::DEBUG, "partition_trail:\n{partition_trail:?}");
+        //             // find trail
+        //             let trails = {
+        //                 let mut trails: Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)> = 'initialize_trail: {
+        //                     let inter_edge = partition_trail[0];
+
+        //                     if VectorId(value.id) == inter_edge.0 .1 {
+        //                         break 'initialize_trail vec![inter_edge];
+        //                     }
+        //                     let min_span_tree =
+        //                         resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+
+        //                     let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                         todo!()
+        //                     };
+
+        //                     let Ok(trail) =
+        //                         min_span_tree.find_trail(VectorId(value.id), inter_edge.0 .1)
+        //                     else {
+        //                         todo!()
+        //                         // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
+        //                     };
+
+        //                     let Some(trail) = trail else {
+        //                         event!(
+        //                             Level::DEBUG,
+        //                             "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?} => {:?} == {:?}",
+        //                             VectorId(value.id),
+        //                             inter_edge.0 .1,
+        //                             inter_edge.1,
+        //                             vec_to_partition[&inter_edge.0 .1]
+        //                         );
+        //                         todo!()
+        //                     };
+
+        //                     trail
+        //                         .1
+        //                         .into_iter()
+        //                         .map(|(vector_id_1, vector_id_2, weight)| {
+        //                             (
+        //                                 (closet_partition_id, vector_id_1),
+        //                                 (closet_partition_id, vector_id_2),
+        //                                 weight,
+        //                             )
+        //                         })
+        //                         .chain(vec![inter_edge].into_iter())
+        //                         .collect()
+        //                 };
+
+        //                 for i in 1..partition_trail.len() {
+        //                     let (_, (partition_id_1, vector_id_1), _) = partition_trail[i - 1];
+        //                     let (
+        //                         (partition_id_2, vector_id_2),
+        //                         (partition_id_3, vector_id_3),
+        //                         edge_2_weight,
+        //                     ) = partition_trail[i];
+
+        //                     if vector_id_1 == vector_id_2 {
+        //                         trails.push((
+        //                             (partition_id_2, vector_id_2),
+        //                             (partition_id_3, vector_id_3),
+        //                             edge_2_weight,
+        //                         ));
+        //                         continue;
+        //                     }
+
+        //                     if !partition_trail_cache.contains_key(&partition_id_1)
+        //                         || !partition_trail_cache[&partition_id_1]
+        //                             .contains_key(&(vector_id_1, vector_id_2))
+        //                     {
+        //                         let min_span_tree =
+        //                             resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id_1);
+
+        //                         let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                             todo!()
+        //                         };
+
+        //                         let Ok(trail) = min_span_tree.find_trail(vector_id_1, vector_id_2)
+        //                         else {
+        //                             event!(
+        //                                 Level::DEBUG,
+        //                                 "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?} => {:?}",
+        //                                 VectorId(value.id),
+        //                                 (partition_id_2, vector_id_2),
+        //                                 (partition_id_3, vector_id_3)
+        //                             );
+        //                             todo!()
+        //                             // continue 'ordered_edges_loop; // Should be replaced with panic as this edge case should never happen
+        //                         };
+
+        //                         let Some(trail) = trail else { todo!() };
+
+        //                         if !partition_trail_cache.contains_key(&partition_id_1) {
+        //                             partition_trail_cache.insert(partition_id_1, HashMap::new());
+        //                         }
+        //                         partition_trail_cache
+        //                             .get_mut(&partition_id_1)
+        //                             .unwrap()
+        //                             .insert((vector_id_1, vector_id_2), trail.1);
+        //                     }
+
+        //                     let trail: Vec<_> = partition_trail_cache[&partition_id_1]
+        //                         [&(vector_id_1, vector_id_2)]
+        //                         .iter()
+        //                         .map(|(vector_id_1, vector_id_2, weight)| {
+        //                             (
+        //                                 (partition_id_1, *vector_id_1),
+        //                                 (partition_id_1, *vector_id_2),
+        //                                 *weight,
+        //                             )
+        //                         })
+        //                         .chain(
+        //                             vec![(
+        //                                 (partition_id_2, vector_id_2),
+        //                                 (partition_id_3, vector_id_3),
+        //                                 edge_2_weight,
+        //                             )]
+        //                             .into_iter(),
+        //                         )
+        //                         .collect();
+
+        //                     trails.extend(trail)
+        //                 }
+
+        //                 'final_trail: {
+        //                     // if partition_trail.len() == 1 {
+        //                     //     break 'final_trail;
+        //                     // }
+        //                     let (_, (partition_id_1, vector_id_1), _) =
+        //                         partition_trail.last().unwrap();
+
+        //                     if vector_id_1 == &vector_id {
+        //                         break 'final_trail;
+        //                     }
+
+        //                     let min_span_tree =
+        //                         resolve_buffer!(ACCESS, min_span_tree_buffer, *partition_id_1);
+
+        //                     let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                         todo!()
+        //                     };
+        //                     let Ok(path) = min_span_tree.find_trail(*vector_id_1, vector_id) else {
+        //                         event!(
+        //                             Level::DEBUG,
+        //                             "Failed to find trail:\n{min_span_tree:?}\n{:?}\n{:?} => {:?}",
+        //                             VectorId(value.id),
+        //                             (vector_id_1, vec_to_partition[&vector_id_1]),
+        //                             (vector_id, vec_to_partition[&vector_id]),
+        //                         );
+        //                         todo!()
+        //                     };
+        //                     let Some(path) = path else { todo!() };
+
+        //                     trails.extend(
+        //                         path.1
+        //                             .into_iter()
+        //                             .map(|(vector_id_1, vector_id_2, weight)| {
+        //                                 (
+        //                                     (*partition_id_1, vector_id_1),
+        //                                     (*partition_id_1, vector_id_2),
+        //                                     weight,
+        //                                 )
+        //                             }), // .collect::<Vec<_>>()
+        //                     )
+        //                 };
+
+        //                 trails
+        //             };
+
+        //             event!(Level::DEBUG, "{trails:?}");
+
+        //             let ((partition_id_1, vector_id_1), (partition_id_2, vector_id_2), max_weight) =
+        //                 trails.into_iter().fold(
+        //                     (
+        //                         (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
+        //                         (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
+        //                         A::min(),
+        //                     ),
+        //                     |(acc_id_1, acc_id_2, acc_weight),
+        //                      (next_id_1, next_id_2, next_weight)| {
+        //                         match next_weight.partial_cmp(&acc_weight) {
+        //                             Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
+        //                             _ => (acc_id_1, acc_id_2, acc_weight),
+        //                         }
+        //                     },
+        //                 );
+        //             if partition_id_1 == PartitionId(Uuid::nil()) {
+        //                 continue;
+        //             }
+        //             if partition_id_2 == PartitionId(Uuid::nil()) {
+        //                 continue;
+        //             }
+
+        //             event!(
+        //                 Level::DEBUG,
+        //                 "Max edge {:?}",
+        //                 (
+        //                     (partition_id_1, vector_id_1),
+        //                     (partition_id_2, vector_id_2),
+        //                     max_weight,
+        //                     weight
+        //                 )
+        //             );
+        //             // if max weight < weight
+        //             if weight >= max_weight {
+        //                 continue;
+        //             };
+
+        //             if partition_id_1 == partition_id_2 {
+        //                 let min_span_tree =
+        //                     resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id_1);
+
+        //                 let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                     todo!()
+        //                 };
+
+        //                 let _ = min_span_tree.remove_edge(vector_id_1, vector_id_2).unwrap();
+
+        //                 partition_trail_cache.remove(&partition_id_1);
+
+        //                 // split partition
+        //                 'split_partition: {
+        //                     // let min_span_tree =
+        //                     //     resolve_buffer!(ACCESS, min_span_tree_buffer, partition_id);
+
+        //                     // let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                     //     todo!()
+        //                     // };
+
+        //                     if calculate_number_of_trees(&min_span_tree) != 2 {
+        //                         panic!("Removing an edge from a tree should result in two trees");
+        //                     }
+
+        //                     let partition_buffer = &mut *w_partition_buffer;
+
+        //                     let partition =
+        //                         resolve_buffer!(ACCESS, partition_buffer, partition_id_1)
+        //                     else {
+        //                         todo!()
+        //                     };
+        //                     let Some(partition) = &mut *partition.write().await else {
+        //                         todo!()
+        //                     };
+
+        //                     let mut pairs =
+        //                         split_partition_into_trees(partition, min_span_tree, inter_graph)
+        //                             .unwrap();
+        //                     event!(Level::DEBUG, "split data: {pairs:#?}");
+
+        //                     // if pairs.len() != 2 {
+        //                     //     todo!()
+        //                     // }
+
+        //                     {
+        //                         let (new_partition, new_min_span_tree) = pairs.remove(0);
+
+        //                         if new_partition.id != *partition_id_1 {
+        //                             todo!()
+        //                         }
+
+        //                         *partition = new_partition;
+        //                         *min_span_tree = new_min_span_tree;
+
+        //                         let target_meta: &mut Meta<A, B> =
+        //                             &mut *meta_data[&*partition_id_1].write().await;
+
+        //                         target_meta.size = partition.size;
+        //                         target_meta.centroid = partition.centroid();
+
+        //                         target_meta.edge_length = (
+        //                             match min_span_tree.smallest_edge() {
+        //                                 Some(x) => x.2,
+        //                                 None => A::max(),
+        //                             },
+        //                             match min_span_tree.largest_edge() {
+        //                                 Some(x) => x.2,
+        //                                 None => A::min(),
+        //                             },
+        //                         );
+        //                     }
+
+        //                     for (new_partition, new_min_span_tree) in pairs {
+        //                         meta_data.insert(
+        //                             new_partition.id,
+        //                             Arc::new(RwLock::new(Meta::new(
+        //                                 PartitionId(new_partition.id),
+        //                                 new_partition.size,
+        //                                 new_partition.centroid(),
+        //                                 (
+        //                                     match new_min_span_tree.smallest_edge() {
+        //                                         Some(x) => x.2,
+        //                                         None => A::max(),
+        //                                     },
+        //                                     match new_min_span_tree.largest_edge() {
+        //                                         Some(x) => x.2,
+        //                                         None => A::min(),
+        //                                     },
+        //                                 ),
+        //                             ))),
+        //                         );
+
+        //                         new_partition.iter().for_each(|vector_entry| {
+        //                             if vector_entry.id == value.id {
+        //                                 closet_partition_id = PartitionId(new_partition.id)
+        //                             }
+
+        //                             vec_to_partition.insert(
+        //                                 VectorId(vector_entry.id),
+        //                                 PartitionId(new_partition.id),
+        //                             );
+        //                         });
+
+        //                         resolve_buffer!(
+        //                             PUSH,
+        //                             partition_buffer,
+        //                             new_partition,
+        //                             [*partition_id_1, partition.id]
+        //                         );
+        //                         resolve_buffer!(
+        //                             PUSH,
+        //                             min_span_tree_buffer,
+        //                             new_min_span_tree,
+        //                             [*partition_id_1, *min_span_tree.2]
+        //                         );
+        //                     }
+        //                 };
+        //             } else {
+        //                 partition_trail_cache.remove(&partition_id_1);
+        //                 partition_trail_cache.remove(&partition_id_2);
+        //                 let _ = inter_graph
+        //                     .remove_edge(
+        //                         (partition_id_1, vector_id_1),
+        //                         (partition_id_2, vector_id_2),
+        //                     )
+        //                     .unwrap();
+        //             }
+
+        //             // add new inter_edge
+        //             if vec_to_partition[&vector_id] == closet_partition_id {
+        //                 let min_span_tree =
+        //                     resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+
+        //                 let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+        //                     todo!()
+        //                 };
+
+        //                 let _ = min_span_tree.add_edge(VectorId(value.id), vector_id, weight);
+
+        //                 update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
+        //             } else {
+        //                 inter_graph.add_edge(
+        //                     vec_to_partition[&vector_id],
+        //                     closet_partition_id,
+        //                     (
+        //                         weight,
+        //                         (vec_to_partition[&vector_id], vector_id),
+        //                         (closet_partition_id, VectorId(value.id)),
+        //                     ),
+        //                 );
+        //                 update_cluster(cluster_sets, &weight, VectorId(value.id), vector_id).await;
+        //             }
+        //         }
+        //     }
+        // }
     }
 
     Ok(())
