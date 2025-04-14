@@ -7,9 +7,7 @@ use std::{
 };
 
 use spade::{DelaunayTriangulation, HasPosition, Triangulation};
-use tokio::{
-    sync::{RwLock},
-};
+use tokio::sync::RwLock;
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -38,7 +36,7 @@ use crate::{
             },
         },
         operations::{
-            cluster::update_cluster,
+            cluster::{remove_cluster_edge, update_cluster},
             split::{
                 calculate_number_of_trees, split_partition, split_partition_into_trees,
                 FirstTreeSplitStrategy, KMean, MaxAttempt, BFS,
@@ -258,7 +256,7 @@ where
             event!(Level::DEBUG, "cluster_set({:?})", cluster_set.threshold);
             let cluster_id = cluster_set.new_cluster().await.unwrap();
             let _ = cluster_set
-                .insert(VectorId(value.id), cluster_id)
+                .new_cluster_from_vector(VectorId(value.id), cluster_id)
                 .await
                 .unwrap();
         }
@@ -587,7 +585,7 @@ where
             event!(Level::DEBUG, "cluster_set({:?})", cluster_set.threshold);
             let cluster_id = cluster_set.new_cluster().await.unwrap();
             let _ = cluster_set
-                .insert(VectorId(value.id), cluster_id)
+                .new_cluster_from_vector(VectorId(value.id), cluster_id)
                 .await
                 .unwrap();
         }
@@ -840,6 +838,8 @@ where
                 let _ = min_span_tree
                     .remove_edge(max_vector_id_1, max_vector_id_2)
                     .unwrap();
+
+                let _ = remove_cluster_edge(cluster_sets, max_vector_id_1, max_vector_id_2);
 
                 min_span_tree.add_edge(VectorId(value.id), *vector_id, weight);
 
@@ -1151,6 +1151,7 @@ where
                             };
 
                             let _ = min_span_tree.remove_edge(vector_id_1, vector_id_2).unwrap();
+                            let _ = remove_cluster_edge(cluster_sets, vector_id_1, vector_id_2);
 
                             let [pair_2, pair_1] = split_partition::<
                                 A,
@@ -1207,8 +1208,7 @@ where
 
                             let (new_partition, new_min_span_tree) = pair_2;
 
-                            if new_min_span_tree.1.contains_key(&VectorId(value.id))
-                            {
+                            if new_min_span_tree.1.contains_key(&VectorId(value.id)) {
                                 event!(
                                     Level::DEBUG,
                                     "Updating closet_partition_id: {closet_partition_id:?}->{split_partition_id:?}"
@@ -1252,10 +1252,7 @@ where
                             event!(
                                 Level::DEBUG,
                                 "Removing edge inter edge: {:?}",
-                                (
-                                    (partition_id_1, vector_id_1),
-                                    (partition_id_2, vector_id_2)
-                                )
+                                ((partition_id_1, vector_id_1), (partition_id_2, vector_id_2))
                             );
                             let _ = inter_graph
                                 .remove_edge(
@@ -1263,6 +1260,8 @@ where
                                     (partition_id_2, vector_id_2),
                                 )
                                 .unwrap();
+
+                            let _ = remove_cluster_edge(cluster_sets, vector_id_1, vector_id_2);
                         }
                     };
 

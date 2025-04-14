@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, fmt::Debug, str::FromStr};
+use std::{cmp::Ordering, fmt::Debug, str::FromStr, time::Duration};
 
 use async_sqlite::{Client, ClientBuilder, JournalMode};
 use rancor::Strategy;
@@ -68,11 +68,11 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                 [],
             )?;
             conn.execute(
-                "CREATE TABLE ClusterEdge(source STRING, target STRING)", // replace cluster_id from String to INT & Sort by cluster_id
+                "CREATE TABLE ClusterEdge(source STRING, target STRING, weight REAL, FOREIGN KEY (source) REFERENCES Clusters(vector_id), FOREIGN KEY (target) REFERENCES Clusters(vector_id))", // replace cluster_id from String to INT & Sort by cluster_id
                 [],
             )?;
             conn.execute(
-                "CREATE TABLE ClusterMeta(cluster_id STRING PRIMARY KEY)", // should map String -> Int
+                "CREATE TABLE ClusterMeta(cluster_id STRING PRIMARY KEY, size INT, merged_into STRING)", // should map String -> Int
                 [],
             )
         })
@@ -122,7 +122,7 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
 
                 move |conn| {
                     conn.execute(
-                        "INSERT iNTO ClusterMeta(cluster_id) VALUES (?)",
+                        "INSERT iNTO ClusterMeta(cluster_id, size) VALUES (?, 0)",
                         [cluster_id.0.to_string()],
                     )
                 }
@@ -133,9 +133,17 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(cluster_id)
     }
 
-    pub async fn insert(&mut self, vector_id: VectorId, cluster_id: ClusterId) -> Result<(), ()> {
+    pub async fn new_cluster_from_vector(
+        &mut self,
+        vector_id: VectorId,
+        cluster_id: ClusterId,
+    ) -> Result<(), ()> {
         self.conn
             .conn(move |conn| {
+                let _ = conn.execute(
+                    "UPDATE ClusterMeta SET size=size+1 WHERE cluster_id=?",
+                    [cluster_id.0.to_string()],
+                );
                 conn.execute(
                     "INSERT iNTO Clusters(vector_id, cluster_id) VALUES (?, ?)",
                     [vector_id.0.to_string(), cluster_id.0.to_string()],
@@ -147,29 +155,143 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(())
     }
 
-    pub async fn merge_clusters(
+    pub async fn add_edge(
+        &mut self,
+        vector_id_1: VectorId,
+        vector_id_2: VectorId,
+        weight: A,
+    ) -> Result<(), ()>
+    where
+        A: Into<f32>,
+    {
+        let weight = weight.into();
+
+        let _ = self
+            .conn
+            .conn(move |conn| {
+                let affected = conn.execute(
+                    "INSERT INTO ClusterEdge(source, target, weight)
+                     SELECT ?, ?, ?
+                     WHERE (
+                         (SELECT cluster_id FROM Clusters WHERE vector_id = ?) !=
+                         (SELECT cluster_id FROM Clusters WHERE vector_id = ?)
+                     )",
+                    (
+                        vector_id_1.to_string(),
+                        vector_id_2.to_string(),
+                        weight,
+                        vector_id_1.to_string(),
+                        vector_id_2.to_string(),
+                    ),
+                )?;
+                Ok(affected > 0)
+            })
+            .await
+            .unwrap();
+        Ok(())
+    }
+
+    pub async fn delete_edge(
+        &mut self,
+        vector_id_1: VectorId,
+        vector_id_2: VectorId,
+    ) -> Result<(), ()> {
+        let _ = self.conn
+            .conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM ClusterEdge WHERE (source=? AND target=?) OR (source=? AND target=?) ",
+                    (
+                        vector_id_1.0.to_string(), vector_id_2.0.to_string(),
+                        vector_id_1.0.to_string(), vector_id_1.0.to_string()
+                    ),
+                )
+            })
+            .await
+            .unwrap();
+        Ok(())
+    }
+
+    pub async fn get_edges(&self) -> Result<Vec<(VectorId, VectorId, A)>, ()> {
+        todo!()
+    }
+
+    pub async fn merge_clusters<const MAX_ATTEMPTS: usize>(
         &mut self,
         cluster_id_1: ClusterId,
         cluster_id_2: ClusterId,
     ) -> Result<(), ()> {
-        self.conn
-            .conn(move |conn| {
-                let _ = conn.execute(
-                    "UPDATE Clusters SET cluster_id=? WHERE cluster_id=?",
-                    (cluster_id_1.0.to_string(), cluster_id_2.0.to_string()),
-                );
+        for _ in 0..MAX_ATTEMPTS {
+            let result = self
+                .conn
+                .conn(move |conn| {
+                    conn.busy_timeout(Duration::from_secs(5)).ok();
 
-                let _ = conn.execute(
-                    "DELETE FROM ClusterMeta WHERE cluster_id=?",
-                    (cluster_id_2.0.to_string(),),
-                );
+                    if let Err(e) = conn.execute("BEGIN IMMEDIATE", []) {
+                        if e.to_string().contains("SQLITE_BUSY") {
+                            return Err(e); // Retry outside
+                        } else {
+                            return Err(e);
+                        }
+                    }
 
-                Ok(())
-            })
-            .await
-            .expect("Failed to merge clusters");
+                    let size_1: i64 = conn
+                        .query_row(
+                            "SELECT size FROM ClusterMeta WHERE cluster_id = ?",
+                            [cluster_id_1.0.to_string()],
+                            |row| row.get(0),
+                        )
+                        .expect("cluster_id_1 missing");
 
-        Ok(())
+                    let size_2: i64 = conn
+                        .query_row(
+                            "SELECT size FROM ClusterMeta WHERE cluster_id = ?",
+                            [cluster_id_2.0.to_string()],
+                            |row| row.get(0),
+                        )
+                        .expect("cluster_id_2 missing");
+
+                    let merge_size = size_1 + size_2;
+
+                    let (cluster_id_1, cluster_id_2) = match size_1 > size_2 {
+                        true => (cluster_id_1, cluster_id_2),
+                        false => (cluster_id_2, cluster_id_1),
+                    };
+
+                    let _ = conn.execute(
+                        "UPDATE Clusters SET cluster_id=? WHERE cluster_id=?",
+                        (cluster_id_1.0.to_string(), cluster_id_2.0.to_string()),
+                    );
+                    let _ = conn.execute(
+                        "UPDATE ClusterMeta SET size=?, merged_into=? WHERE cluster_id=?",
+                        (
+                            merge_size,
+                            cluster_id_1.0.to_string(),
+                            cluster_id_2.0.to_string(),
+                        ),
+                    );
+                    let _ = conn.execute(
+                        "UPDATE ClusterMeta SET size=? WHERE cluster_id=?",
+                        (merge_size, cluster_id_1.0.to_string()),
+                    );
+
+                    // let _ = conn.execute(
+                    //     "DELETE FROM ClusterMeta WHERE cluster_id=?",
+                    //     (cluster_id_2.0.to_string(),),
+                    // );
+
+                    let _ = conn
+                        .execute("COMMIT", [])
+                        .expect("Failed to commit transaction");
+
+                    Ok(())
+                })
+                .await;
+            if result.is_ok() {
+                return Ok(());
+            }
+        }
+
+        Err(())
     }
 
     pub async fn insert_cluster_edge(
@@ -194,7 +316,14 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         let cluster_ids = self
             .conn
             .conn(|conn| {
-                let mut stmt = conn.prepare("SELECT cluster_id FROM ClusterMeta").unwrap();
+                let mut stmt = conn.prepare("
+                SELECT
+                    cluster_id
+                FROM
+                    ClusterMeta
+                WHERE
+                    merged_into = NULL AND size > 0
+                ").unwrap();
 
                 let rows: Vec<ClusterId> = stmt
                     .query_map([], |row| {
@@ -265,6 +394,10 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
             .await;
 
         vectors.unwrap()
+    }
+
+    pub async fn clean_up(&mut self) -> Result<(), ()> {
+        todo!()
     }
 }
 

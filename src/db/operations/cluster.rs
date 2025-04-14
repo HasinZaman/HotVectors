@@ -116,7 +116,9 @@ pub async fn build_clusters_from_scratch<
                     "Initial cluster ID: {:?} assigned to vector {:?}",
                     cluster_id, start_vector
                 );
-                let _ = cluster_set.insert(*start_vector, cluster_id).await;
+                let _ = cluster_set
+                    .new_cluster_from_vector(*start_vector, cluster_id)
+                    .await;
 
                 let mut vector_to_cluster = HashMap::new();
                 vector_to_cluster.insert(start_vector, cluster_id);
@@ -155,13 +157,17 @@ pub async fn build_clusters_from_scratch<
                         }
 
                         if weight < &threshold {
-                            let _ = cluster_set.insert(*out_bound_vec, cluster_id).await;
+                            let _ = cluster_set
+                                .new_cluster_from_vector(*out_bound_vec, cluster_id)
+                                .await;
                             visit_stack.push(out_bound_vec);
                         } else {
                             cluster_edges.push((*vector, *out_bound_vec));
 
                             let new_cluster = cluster_set.new_cluster().await.unwrap();
-                            let _ = cluster_set.insert(*out_bound_vec, new_cluster).await;
+                            let _ = cluster_set
+                                .new_cluster_from_vector(*out_bound_vec, new_cluster)
+                                .await;
                             cluster_seeds.push((out_bound_vec, new_cluster));
                         }
                     }
@@ -243,13 +249,17 @@ pub async fn build_clusters_from_scratch<
                         }
 
                         if weight < &threshold {
-                            let _ = cluster_set.insert(*out_bound_vec, cluster_id).await;
+                            let _ = cluster_set
+                                .new_cluster_from_vector(*out_bound_vec, cluster_id)
+                                .await;
                             visit_stack.push(out_bound_vec);
                         } else {
                             cluster_edges.push((*vector, *out_bound_vec));
 
                             let new_cluster = cluster_set.new_cluster().await.unwrap();
-                            let _ = cluster_set.insert(*out_bound_vec, new_cluster).await;
+                            let _ = cluster_set
+                                .new_cluster_from_vector(*out_bound_vec, new_cluster)
+                                .await;
                             cluster_seeds.push((out_bound_vec, new_cluster));
                         }
                     }
@@ -301,7 +311,7 @@ fn build_larger_clusters_from_nearest_cluster() {
     todo!()
 }
 
-pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone>(
+pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone + Into<f32>>(
     cluster_sets: &mut Vec<ClusterSet<A>>,
     dist: &A,
     id_1: VectorId,
@@ -309,6 +319,8 @@ pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone>(
 ) {
     for cluster_set in cluster_sets.iter_mut() {
         if &cluster_set.threshold < dist {
+            let _ = cluster_set.add_edge(id_1, id_2, dist.clone()).await;
+
             continue;
         }
 
@@ -320,8 +332,17 @@ pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone>(
         }
 
         let _ = cluster_set
-            .merge_clusters(cluster_id_1, cluster_id_2)
+            .merge_clusters::<5>(cluster_id_1, cluster_id_2)
             .await
             .unwrap();
+    }
+}
+pub async fn remove_cluster_edge<A: PartialOrd + Field<A> + Debug + Clone + Into<f32>>(
+    cluster_sets: &mut Vec<ClusterSet<A>>,
+    id_1: VectorId,
+    id_2: VectorId,
+) {
+    for cluster_set in cluster_sets.iter_mut() {
+        let _ = cluster_set.delete_edge(id_1, id_2).await;
     }
 }
