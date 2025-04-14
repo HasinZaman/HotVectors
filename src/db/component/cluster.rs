@@ -202,7 +202,7 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                     "DELETE FROM ClusterEdge WHERE (source=? AND target=?) OR (source=? AND target=?) ",
                     (
                         vector_id_1.0.to_string(), vector_id_2.0.to_string(),
-                        vector_id_1.0.to_string(), vector_id_1.0.to_string()
+                        vector_id_2.0.to_string(), vector_id_1.0.to_string()
                     ),
                 )
             })
@@ -370,30 +370,59 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(cluster_id.unwrap())
     }
 
-    pub async fn get_cluster_members(&self, id: ClusterId) -> Vec<VectorId> {
-        let vectors = self
-            .conn
-            .conn(move |conn| {
-                let mut stmt = conn
-                    .prepare("SELECT vector_id FROM Clusters WHERE cluster_id = ?")
-                    .unwrap();
+    pub async fn get_cluster_members<const MAX_ATTEMPTS: usize>(&self, id: ClusterId) -> Result<Vec<VectorId>, ()> {
+        for _ in 0..MAX_ATTEMPTS {
+            let vectors = self
+                .conn
+                .conn(move |conn| {
+                    conn.busy_timeout(Duration::from_secs(5)).ok();
 
-                let rows: Vec<VectorId> = stmt
-                    .query_map([id.0.to_string()], |row| {
-                        let uuid_str: String = row.get(0).unwrap();
-                        let uuid = Uuid::from_str(&uuid_str).unwrap();
+                    if let Err(e) = conn.execute("BEGIN DEFERRED", []) {
+                        if e.to_string().contains("SQLITE_BUSY") {
+                            return Err(e); // Retry outside
+                        } else {
+                            return Err(e);
+                        }
+                    }
 
-                        Ok(VectorId(uuid))
-                    })
-                    .unwrap()
-                    .map(|x| x.unwrap())
-                    .collect();
+                    let merged_cluster_id: Option<String> = conn
+                        .query_row(
+                            "SELECT merged_into FROM ClusterMeta WHERE cluster_id = ? AND merged_into IS NOT NULL",
+                            [id.0.to_string()],
+                            |row| row.get(0),
+                        )
+                        .ok();
 
-                Ok(rows)
-            })
-            .await;
+                    let id = merged_cluster_id.unwrap_or_else(|| id.0.to_string());
 
-        vectors.unwrap()
+                    let mut stmt = conn
+                        .prepare("SELECT vector_id FROM Clusters WHERE cluster_id = ?")
+                        .unwrap();
+
+                    let rows: Vec<VectorId> = stmt
+                        .query_map([id], |row| {
+                            let uuid_str: String = row.get(0).unwrap();
+                            let uuid = Uuid::from_str(&uuid_str).unwrap();
+
+                            Ok(VectorId(uuid))
+                        })
+                        .unwrap()
+                        .map(|x| x.unwrap())
+                        .collect();
+                    
+                    let _ = conn
+                        .execute("COMMIT", [])
+                        .expect("Failed to commit transaction");
+
+                    Ok(rows)
+                })
+                .await;
+            if vectors.is_ok(){
+                return Ok(vectors.unwrap())
+            }
+        }
+
+        Err(())
     }
 
     pub async fn clean_up(&mut self) -> Result<(), ()> {

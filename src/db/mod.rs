@@ -38,6 +38,7 @@ use rkyv::{
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, Deserialize, DeserializeUnsized,
 };
+use spade::HasPosition;
 use tokio::{
     join, runtime,
     sync::{
@@ -221,7 +222,8 @@ pub fn db_loop<
         + Extremes
         + PartialEq
         + 'static
-        + Debug,
+        + Debug
+        + HasPosition<Scalar = f32>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
@@ -241,6 +243,7 @@ where
         DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
     VectorSerial<A>: From<B>,
     <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
+    f32: From<A>,
 {
     event!(Level::INFO, "🔥 HOT VECTOR START UP 👠👠");
 
@@ -693,7 +696,7 @@ where
                                                 )))
                                                 .await;
                                             let vector_ids =
-                                                cluster_set.get_cluster_members(cluster_id).await;
+                                                cluster_set.get_cluster_members::<5>(cluster_id).await.unwrap();
 
                                             for vec_id in vector_ids {
                                                 let _ = tx
