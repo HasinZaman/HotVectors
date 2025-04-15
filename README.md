@@ -29,7 +29,7 @@ Hot Vectors is a vector database designed with native hierarchical clustering an
 
 ## Demonstration
 ### Vectors being inserted into a database
-![Vectors being inserted into a database](demo.gif)
+![Vectors being inserted into a database](.\demo.gif)
 
 ## Future Optimization
 ### Updates of Minimum Spanning Trees
