@@ -23,7 +23,7 @@ use component::{
 use log::State;
 use operations::{
     add::add,
-    cluster::build_clusters_from_scratch,
+    cluster::build_clusters,
     read::{
         knn::stream_exact_knn, stream_inter_graph, stream_meta_data, stream_partition_graph,
         stream_vectors_from_partition,
@@ -43,7 +43,7 @@ use tokio::{
     join, runtime,
     sync::{
         mpsc::{Receiver, Sender},
-        RwLock,
+        Notify, RwLock,
     },
     time::sleep,
 };
@@ -419,13 +419,16 @@ where
             });
         }
 
+        let notify_update = Arc::new(Notify::new());
         {
             let meta_data = meta_data.clone();
             let inter_spanning_graph = inter_spanning_graph.clone();
             let cluster_data = cluster_sets.clone();
+            let notify_update = notify_update.clone();
 
             rt.spawn(async move {
                 loop {
+                    notify_update.notified().await;
                     sleep(Duration::from_secs(20)).await; //60 * 1)).await;
                     {
                         event!(Level::INFO, "Saving inter_spanning_graph 👠😎");
@@ -456,13 +459,15 @@ where
                 }
             });
         }
-
         {
+            let notify_update = notify_update.clone();
+
             let partition_buffer = partition_buffer.clone();
             let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
 
             rt.spawn(async move {
                 loop {
+                    notify_update.notified().await;
                     sleep(Duration::from_secs(40)).await; //60 * 1)).await;
                     {
                         event!(Level::INFO, "saving contents of partition_buffer");
@@ -519,6 +524,8 @@ where
 
                             let cluster_sets = cluster_sets.clone();
 
+                            let notify_update = notify_update.clone();
+
                             rt.spawn(async move {
                                 let value = VectorEntry::from_uuid(vector, id);
 
@@ -542,6 +549,8 @@ where
                                 // let _ = sender.send(Response::Success);
                                 println!("(Done) Insert Vector :- {vector:?}");
                                 tx.send(Response::Done).await.unwrap();
+
+                                notify_update.notify_waiters();
                             });
                         }
                         AtomicCmd::DeleteVector {
@@ -662,9 +671,11 @@ where
                             let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
                                 inter_spanning_graph.clone();
 
+                            let notify_update = notify_update.clone();
+
                             rt.spawn(async move {
                                 // let cluster_data = &mut *cluster_data.write().await;
-                                build_clusters_from_scratch(
+                                build_clusters(
                                     threshold,
                                     meta_data,
                                     cluster_sets,
@@ -673,7 +684,8 @@ where
                                 )
                                 .await;
 
-                                tx.send(Response::Done).await
+                                let _ = tx.send(Response::Done).await;
+                                notify_update.notify_waiters();
                             });
                         }
                         AtomicCmd::GetClusters { threshold } => {
@@ -695,8 +707,10 @@ where
                                                     cluster_id,
                                                 )))
                                                 .await;
-                                            let vector_ids =
-                                                cluster_set.get_cluster_members::<5>(cluster_id).await.unwrap();
+                                            let vector_ids = cluster_set
+                                                .get_cluster_members::<5>(cluster_id)
+                                                .await
+                                                .unwrap();
 
                                             for vec_id in vector_ids {
                                                 let _ = tx
