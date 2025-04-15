@@ -54,6 +54,114 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         results
     }
 
+    pub async fn from_smaller_cluster_set(threshold: A, other: &Self) -> Self
+    where
+        A: Into<f32>,
+    {
+        let id = Uuid::new_v4();
+
+        let _ = other.copy(id.to_string()).await.unwrap();
+
+        let conn = ClientBuilder::new()
+            .path(&format!("data/clusters//{}.db", id.to_string()))
+            .journal_mode(JournalMode::Memory)
+            .open()
+            .await
+            .unwrap();
+
+        let threshold_f32: f32 = threshold.clone().into();
+        let _ = conn
+            .conn(move |conn| {
+                conn.execute("BEGIN TRANSACTION", [])?;
+
+                let mut stmt =
+                    conn.prepare("SELECT source, target FROM ClusterEdge WHERE weight < ?")?;
+
+                let rows: Vec<(String, String)> = stmt
+                    .query_map([threshold_f32], |row| {
+                        let source: String = row.get(0)?;
+                        let target: String = row.get(1)?;
+                        Ok((source, target))
+                    })?
+                    .filter_map(Result::ok)
+                    .collect();
+
+                for (source, target) in rows {
+                    let cluster_id_1: String = conn
+                        .query_row(
+                            "SELECT cluster_id FROM Clusters WHERE vector_id = ?",
+                            [&source],
+                            |row| row.get(0),
+                        )
+                        .expect("source missing");
+                    let cluster_id_2: String = conn
+                        .query_row(
+                            "SELECT cluster_id FROM Clusters WHERE vector_id = ?",
+                            [&target],
+                            |row| row.get(0),
+                        )
+                        .expect("target missing");
+
+                    if cluster_id_1 == cluster_id_2 {
+                        continue;
+                    }
+                    let size_1: i64 = conn
+                        .query_row(
+                            "SELECT size FROM ClusterMeta WHERE cluster_id = ?",
+                            [&cluster_id_1],
+                            |row| row.get(0),
+                        )
+                        .expect("source missing");
+
+                    let size_2: i64 = conn
+                        .query_row(
+                            "SELECT size FROM ClusterMeta WHERE cluster_id = ?",
+                            [&cluster_id_2],
+                            |row| row.get(0),
+                        )
+                        .expect("target missing");
+
+                    let merge_size = size_1 + size_2;
+
+                    let (cluster_id_1, cluster_id_2) = match size_1 > size_2 {
+                        true => (&cluster_id_1, &cluster_id_2),
+                        false => (&cluster_id_2, &cluster_id_1),
+                    };
+
+                    let _ = conn.execute(
+                        "UPDATE Clusters SET cluster_id=? WHERE cluster_id=?",
+                        (cluster_id_1, cluster_id_2),
+                    );
+                    let _ = conn.execute(
+                        "UPDATE ClusterMeta SET size=?, merged_into=? WHERE cluster_id=?",
+                        (merge_size, cluster_id_1, cluster_id_2),
+                    );
+                    let _ = conn.execute(
+                        "UPDATE ClusterMeta SET size=? WHERE cluster_id=?",
+                        (merge_size, cluster_id_1),
+                    );
+
+                    conn.execute(
+                        "DELETE FROM ClusterEdge WHERE source=? AND target=?",
+                        [source, target],
+                    )?;
+                }
+
+                conn.execute("COMMIT", [])?;
+
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        Self {
+            threshold,
+            id: Uuid::new_v4(),
+
+            conn,
+        }
+    }
+
     pub async fn new(threshold: A) -> Self {
         let id = Uuid::new_v4();
         let conn = ClientBuilder::new()
@@ -316,14 +424,18 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         let cluster_ids = self
             .conn
             .conn(|conn| {
-                let mut stmt = conn.prepare("
+                let mut stmt = conn
+                    .prepare(
+                        "
                 SELECT
                     cluster_id
                 FROM
                     ClusterMeta
                 WHERE
-                    merged_into = NULL AND size > 0
-                ").unwrap();
+                    merged_into IS NULL AND size > 0
+                ",
+                    )
+                    .unwrap();
 
                 let rows: Vec<ClusterId> = stmt
                     .query_map([], |row| {
@@ -370,7 +482,10 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         Ok(cluster_id.unwrap())
     }
 
-    pub async fn get_cluster_members<const MAX_ATTEMPTS: usize>(&self, id: ClusterId) -> Result<Vec<VectorId>, ()> {
+    pub async fn get_cluster_members<const MAX_ATTEMPTS: usize>(
+        &self,
+        id: ClusterId,
+    ) -> Result<Vec<VectorId>, ()> {
         for _ in 0..MAX_ATTEMPTS {
             let vectors = self
                 .conn
@@ -378,22 +493,36 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                     conn.busy_timeout(Duration::from_secs(5)).ok();
 
                     if let Err(e) = conn.execute("BEGIN DEFERRED", []) {
-                        if e.to_string().contains("SQLITE_BUSY") {
-                            return Err(e); // Retry outside
-                        } else {
-                            return Err(e);
-                        }
+                        return Err(e);
                     }
 
-                    let merged_cluster_id: Option<String> = conn
-                        .query_row(
-                            "SELECT merged_into FROM ClusterMeta WHERE cluster_id = ? AND merged_into IS NOT NULL",
-                            [id.0.to_string()],
-                            |row| row.get(0),
-                        )
-                        .ok();
+                    let mut stmt = conn
+                        .prepare("SELECT merged_into FROM ClusterMeta WHERE cluster_id = ? AND merged_into != NULL")
+                        .expect("Failed to prepare statement");
+                    let result: Option<String> = stmt
+                        .query_row([id.0.to_string()], |row| {
+                        
+                            println!("{:?}", row.get::<_, Option<String>>(0));
+                            row.get::<_, Option<String>>(0)
+                        })
+                        .ok()
+                        .flatten();
+                    // println!("{:?}", result);
 
-                    let id = merged_cluster_id.unwrap_or_else(|| id.0.to_string());
+
+                    
+
+                    let id = result.unwrap_or(id.0.to_string());
+                    // println!("{:?}", id);
+                    // let merged_cluster_id: Option<String> = conn
+                    //     .query_row(
+                    //         "SELECT merged_into FROM ClusterMeta WHERE cluster_id = ? AND merged_into IS NOT NULL",
+                    //         [id.0.to_string()],
+                    //         |row| row.get(0),
+                    //     )
+                    //     .ok();
+
+                    // let id = merged_cluster_id.unwrap_or_else(|| id.0.to_string());
 
                     let mut stmt = conn
                         .prepare("SELECT vector_id FROM Clusters WHERE cluster_id = ?")
@@ -409,7 +538,6 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                         .unwrap()
                         .map(|x| x.unwrap())
                         .collect();
-                    
                     let _ = conn
                         .execute("COMMIT", [])
                         .expect("Failed to commit transaction");
@@ -417,8 +545,8 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                     Ok(rows)
                 })
                 .await;
-            if vectors.is_ok(){
-                return Ok(vectors.unwrap())
+            if vectors.is_ok() {
+                return Ok(vectors.unwrap());
             }
         }
 
@@ -426,7 +554,33 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
     }
 
     pub async fn clean_up(&mut self) -> Result<(), ()> {
-        todo!()
+        let _ = self
+            .conn
+            .conn(move |conn| {
+                conn.execute("DELETE FROM ClusterMeta WHERE merged_into=NULL", [])
+                    .unwrap();
+
+                conn.execute("VACUUM", []).unwrap();
+                Ok(())
+            })
+            .await;
+
+        Ok(())
+    }
+
+    pub async fn copy(&self, file_name: String) -> Result<(), ()> {
+        let path = format!("./data/clusters/{}.db", file_name);
+
+        let _ = self
+            .conn
+            .conn(move |conn| {
+                let sql = format!("VACUUM INTO '{}'", path);
+                conn.execute(&sql, []).unwrap();
+                Ok(())
+            })
+            .await;
+
+        Ok(())
     }
 }
 

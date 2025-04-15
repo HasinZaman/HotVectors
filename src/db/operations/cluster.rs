@@ -29,7 +29,7 @@ use crate::{
     vector::{Field, VectorSpace},
 };
 
-pub async fn build_clusters_from_scratch<
+pub async fn build_clusters<
     A: Field<A>
         + Debug
         + Clone
@@ -60,6 +60,7 @@ pub async fn build_clusters_from_scratch<
     <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
     for<'a> <A as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    A: Into<f32>,
 {
     let cluster_sets = &mut *cluster_sets.write().await;
     match cluster_sets.binary_search_by(|x| {
@@ -70,8 +71,8 @@ pub async fn build_clusters_from_scratch<
         Ok(_) => {
             trace!("Cluster set with threshold {:?} already exists.", threshold);
         }
-        Err(pos) => {
-            info!("Creating a new cluster set at position {}", pos);
+        Err(0) => {
+            info!("Creating a new cluster set at position {}", 0);
             let meta_data = &*meta_data.read().await;
             let inter_graph = &*inter_graph.read().await;
 
@@ -98,7 +99,7 @@ pub async fn build_clusters_from_scratch<
 
                 // temp solution (should check at very beginning)
                 if graph.1.len() == 0 {
-                    cluster_sets.insert(pos, cluster_set);
+                    cluster_sets.insert(0, cluster_set);
                     return;
                 }
 
@@ -173,7 +174,7 @@ pub async fn build_clusters_from_scratch<
                     }
 
                     vector_to_cluster.insert(vector, cluster_id);
-                    info!("Cluster set added at position {}", pos);
+                    info!("Cluster set added at position {}", 0);
                 }
 
                 for edge_ref in inter_graph
@@ -293,22 +294,17 @@ pub async fn build_clusters_from_scratch<
                 }
             }
 
-            cluster_sets.insert(pos, cluster_set);
+            cluster_sets.insert(0, cluster_set);
+        }
+        Err(n) => {
+            trace!("Nearest cluster({threshold:?}) for exists {:?}.", n - 1);
+            cluster_sets.insert(
+                n,
+                ClusterSet::from_smaller_cluster_set(threshold, &cluster_sets[n - 1]).await,
+            );
         }
     };
     info!("Finished building clusters.");
-}
-
-pub fn build_clusters_from_nearest_cluster() {
-    todo!()
-}
-
-fn build_smaller_clusters_from_nearest_cluster() {
-    todo!()
-}
-
-fn build_larger_clusters_from_nearest_cluster() {
-    todo!()
 }
 
 pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone + Into<f32>>(
