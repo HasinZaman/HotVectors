@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 gpu_processing = []
 
+benchmark = []
+
 # rest = ["axum"]
 
 [dependencies]

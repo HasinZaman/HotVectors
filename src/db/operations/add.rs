@@ -22,6 +22,8 @@ use rkyv::{
     Archive, DeserializeUnsized,
 };
 
+#[cfg(feature = "benchmark")]
+use crate::db::component::benchmark::Benchmark;
 use crate::{
     db::{
         component::{
@@ -157,6 +159,8 @@ pub async fn add<
     meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
 
     cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>>,
+
+    #[cfg(feature = "benchmark")] benchmark: Benchmark,
 ) -> Result<(), PartitionErr>
 where
     VectorSerial<A>: From<B>,
@@ -189,6 +193,10 @@ where
 
     // find closet id
     let (mut closet_partition_id, mut closet_size) = {
+        #[cfg(feature = "benchmark")]
+        let _child_benchmark =
+            Benchmark::spawn_child("Finding closet partition".to_string(), &benchmark);
+
         event!(Level::INFO, "✨ Finding closest partition");
         let mut meta_data = meta_data.iter();
         let mut closet_size = 0;
@@ -284,6 +292,9 @@ where
     let mut smallest_partition_edge_length: HashMap<PartitionId, A> = HashMap::new();
 
     let closet_vector_id = {
+        #[cfg(feature = "benchmark")]
+        let _child_benchmark =
+            Benchmark::spawn_child("Finding closet vector".to_string(), &benchmark);
         let partition_buffer = &mut *w_partition_buffer;
 
         event!(Level::DEBUG, "📦 Finding closet vector");
@@ -428,6 +439,8 @@ where
 
     // insert into partition
     {
+        #[cfg(feature = "benchmark")]
+        let _child_benchmark = Benchmark::spawn_child("Insert partition".to_string(), &benchmark);
         let partition_buffer = &mut *w_partition_buffer;
         let min_span_tree_buffer = &mut *w_min_spanning_tree_buffer;
 
@@ -593,6 +606,11 @@ where
 
     //update min_spanning
     'update_min_span: {
+        #[cfg(feature = "benchmark")]
+        let _child_benchmark = Benchmark::spawn_child(
+            "Update min-spanning tree".to_string(),
+            &benchmark
+        );
         // filter out partitions where there is no overlap partition_max < vector_min
         // let mut neighbor_ids = HashSet::new();
         let neighbor_ids: HashSet<PartitionId> = get_neighbors::<A, B, VECTOR_CAP>(
@@ -1153,7 +1171,7 @@ where
                             let _ = min_span_tree.remove_edge(vector_id_1, vector_id_2).unwrap();
                             let _ = remove_cluster_edge(cluster_sets, vector_id_1, vector_id_2);
 
-                            let [pair_2, pair_1] = split_partition::<
+                            let [pair_1, pair_2] = split_partition::<
                                 A,
                                 B,
                                 FirstTreeSplitStrategy,
@@ -1165,6 +1183,12 @@ where
                             .unwrap();
                             // split_partition_into_trees(partition, min_span_tree, inter_graph)
                             //     .unwrap();
+
+                            let (pair_1, pair_2) = match pair_1.0.id == *split_partition_id {
+                                true => (pair_1, pair_2),
+                                false => (pair_2, pair_1),
+                            };
+
                             event!(
                                 Level::DEBUG,
                                 "split data: {:#?}\n{inter_graph:#?}",

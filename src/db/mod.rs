@@ -11,6 +11,10 @@ use std::{
 };
 
 use crate::vector::VectorSerial;
+
+#[cfg(feature = "benchmark")]
+use component::benchmark::{benchmark_logger, Benchmark, BenchmarkId};
+
 use component::{
     cluster::ClusterSet,
     data_buffer::DataBuffer,
@@ -301,6 +305,16 @@ where
         .unwrap();
 
     rt.block_on(async {
+        #[cfg(feature = "benchmark")]
+        let benchmark_writer = {
+            let (tx, rx) = std::sync::mpsc::channel::<(BenchmarkId, u64, u64, String)>();
+            let writer = std::sync::Arc::new(tx);
+
+            rt.spawn(async move { benchmark_logger(rx).await });
+
+            writer
+        };
+
         let all_true = all_initialized.iter().all(|x| *x);
         let all_false = all_initialized.iter().all(|x| !*x);
         match (all_false, all_true) {
@@ -526,6 +540,9 @@ where
 
                             let notify_update = notify_update.clone();
 
+                            #[cfg(feature = "benchmark")]
+                            let benchmark_writer = benchmark_writer.clone();
+
                             rt.spawn(async move {
                                 let value = VectorEntry::from_uuid(vector, id);
 
@@ -536,6 +553,8 @@ where
                                     min_spanning_tree_buffer,
                                     meta_data,
                                     cluster_sets,
+                                    #[cfg(feature = "benchmark")]
+                                    Benchmark::new("Insert Vector".to_string(), benchmark_writer),
                                 )
                                 .await
                                 {
@@ -673,7 +692,13 @@ where
 
                             let notify_update = notify_update.clone();
 
+                            #[cfg(feature = "benchmark")]
+                            let benchmark_writer = benchmark_writer.clone();
+
                             rt.spawn(async move {
+                                #[cfg(feature = "benchmark")]
+                                let _benchmark =
+                                    Benchmark::new("Create Cluster".to_string(), benchmark_writer);
                                 // let cluster_data = &mut *cluster_data.write().await;
                                 build_clusters(
                                     threshold,
