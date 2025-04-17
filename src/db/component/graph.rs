@@ -1,5 +1,5 @@
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
     str::FromStr,
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     db::component::ids::{PartitionId, VectorId},
-    vector::Field,
+    vector::{Extremes, Field},
 };
 use rkyv::{
     bytecheck::CheckBytes,
@@ -615,12 +615,6 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
         let mut search_queue: VecDeque<(Vec<VectorId>, A)> = self
             .0
             .edges(self.1[&from])
-            // .filter(|edge_ref| {
-            //     !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
-            // })
-            // .filter(|edge_ref| {
-            //     !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
-            // })
             .map(|edge_ref| {
                 let weight = edge_ref.weight().clone();
                 let (vector_id_1, vector_id_2) = (
@@ -644,31 +638,91 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
                 return Ok(Some((current_weight, current_path)));
             }
 
-            self.0
-                .edges(self.1[&vector_id])
-                // .filter(|edge_ref| {
-                //     !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
-                // })
-                // .filter(|edge_ref| {
-                //     !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
-                // })
-                .for_each(|edge_ref| {
-                    let weight = edge_ref.weight();
-                    let (vector_id_1, vector_id_2) = (
-                        self.0.node_weight(edge_ref.source()).unwrap(),
-                        self.0.node_weight(edge_ref.target()).unwrap(),
-                    );
-                    let next_node = match vector_id_1 == &from {
-                        true => *vector_id_1,
-                        false => *vector_id_2,
-                    };
+            self.0.edges(self.1[&vector_id]).for_each(|edge_ref| {
+                let weight = edge_ref.weight();
+                let (vector_id_1, vector_id_2) = (
+                    self.0.node_weight(edge_ref.source()).unwrap(),
+                    self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+                let next_node = match vector_id_1 == &from {
+                    true => *vector_id_1,
+                    false => *vector_id_2,
+                };
 
-                    let mut new_path = current_path.clone();
-                    new_path.push(next_node);
-                    let new_weight = A::add(&current_weight, weight);
+                let mut new_path = current_path.clone();
+                new_path.push(next_node);
+                let new_weight = A::add(&current_weight, weight);
 
-                    search_queue.push_back((new_path, new_weight));
-                });
+                search_queue.push_back((new_path, new_weight));
+            });
+
+            visited_vectors.insert(*vector_id);
+        }
+
+        Ok(None)
+    }
+
+    pub fn find_walk_with_hints(
+        &self,
+        from: VectorId,
+        to: VectorId,
+        hint: HashMap<VectorId, A>,
+    ) -> Result<Option<(A, Vec<VectorId>)>, ()> {
+        todo!();
+        if !self.1.contains_key(&from) {
+            return Err(());
+        }
+
+        if !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_vectors: HashSet<VectorId> = HashSet::new();
+        visited_vectors.insert(from);
+
+        let mut search_queue: VecDeque<(Vec<VectorId>, A)> = self
+            .0
+            .edges(self.1[&from])
+            .map(|edge_ref| {
+                let weight = edge_ref.weight().clone();
+                let (vector_id_1, vector_id_2) = (
+                    self.0.node_weight(edge_ref.source()).unwrap(),
+                    self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+                let path = match vector_id_1 == &from {
+                    true => vec![*vector_id_1, *vector_id_2],
+                    false => vec![*vector_id_2, *vector_id_1],
+                };
+                (path, weight)
+            })
+            .collect();
+
+        while !search_queue.is_empty() {
+            let (current_path, current_weight) = search_queue.pop_front().unwrap();
+
+            let vector_id = current_path.last().unwrap();
+
+            if vector_id == &to {
+                return Ok(Some((current_weight, current_path)));
+            }
+
+            self.0.edges(self.1[&vector_id]).for_each(|edge_ref| {
+                let weight = edge_ref.weight();
+                let (vector_id_1, vector_id_2) = (
+                    self.0.node_weight(edge_ref.source()).unwrap(),
+                    self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+                let next_node = match vector_id_1 == &from {
+                    true => *vector_id_1,
+                    false => *vector_id_2,
+                };
+
+                let mut new_path = current_path.clone();
+                new_path.push(next_node);
+                let new_weight = A::add(&current_weight, weight);
+
+                search_queue.push_back((new_path, new_weight));
+            });
 
             visited_vectors.insert(*vector_id);
         }
@@ -745,6 +799,143 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
         }
 
         Ok(None)
+    }
+
+    pub fn find_trail_with_hints(
+        &self,
+        from: VectorId,
+        to: VectorId,
+        hint: &HashMap<VectorId, A>,
+    ) -> Result<Option<(A, Vec<(VectorId, VectorId, A)>)>, ()>
+    where
+        A: Extremes + PartialOrd,
+    {
+        if !self.1.contains_key(&from) || !self.1.contains_key(&to) {
+            return Err(());
+        }
+
+        let mut visited_vectors: HashSet<VectorId> = HashSet::new();
+        visited_vectors.insert(from);
+
+        let mut search_queue: Vec<Reverse<(A, A, Vec<(VectorId, VectorId, A)>)>> = self
+            .0
+            .edges(self.1[&from])
+            .map(|edge_ref| {
+                let weight = edge_ref.weight().clone();
+                let (vector_id_1, vector_id_2) = (
+                    *self.0.node_weight(edge_ref.source()).unwrap(),
+                    *self.0.node_weight(edge_ref.target()).unwrap(),
+                );
+
+                let edge = match vector_id_1 == from {
+                    true => (vector_id_1, vector_id_2, weight.clone()),
+                    false => (vector_id_2, vector_id_1, weight.clone()),
+                };
+
+                let next_node_weight = hint[&edge.1];
+
+                Reverse((next_node_weight, weight, vec![edge]))
+            })
+            .collect();
+
+        heapify::make_heap(&mut search_queue);
+
+        heapify::pop_heap(&mut search_queue);
+        while let Some(Reverse((_, current_weight, current_trail))) = search_queue.pop() {
+            let (_, last_vector, _) = current_trail.last().unwrap();
+
+            if last_vector == &to {
+                return Ok(Some((current_weight, current_trail)));
+            }
+
+            self.0
+                .edges(self.1[&last_vector])
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.source()).unwrap())
+                })
+                .filter(|edge_ref| {
+                    !visited_vectors.contains(&self.0.node_weight(edge_ref.target()).unwrap())
+                })
+                .for_each(|edge_ref| {
+                    let weight = edge_ref.weight();
+                    let (vector_id_1, vector_id_2) = (
+                        *self.0.node_weight(edge_ref.source()).unwrap(),
+                        *self.0.node_weight(edge_ref.target()).unwrap(),
+                    );
+
+                    let next_node = if vector_id_1 == *last_vector {
+                        vector_id_2
+                    } else {
+                        vector_id_1
+                    };
+
+                    let new_edge = (*last_vector, next_node, weight.clone());
+                    let mut new_trail = current_trail.clone();
+                    new_trail.push(new_edge);
+
+                    let new_weight = A::add(&current_weight, weight);
+
+                    search_queue.push(Reverse((hint[&vector_id_2], new_weight, new_trail)));
+
+                    heapify::push_heap(&mut search_queue);
+                });
+            visited_vectors.insert(*last_vector);
+
+            heapify::pop_heap(&mut search_queue);
+        }
+
+        Ok(None)
+    }
+
+    pub fn dijkstra_weights(&self, start: VectorId) -> Result<HashMap<VectorId, A>, ()>
+    where
+        A: PartialOrd,
+    {
+        let &start_idx = self.1.get(&start).ok_or(())?;
+
+        let mut dist: HashMap<NodeIndex<_>, A> = HashMap::new();
+        let mut prev: HashMap<NodeIndex<_>, NodeIndex<_>> = HashMap::new();
+        let mut heap = Vec::new();
+
+        dist.insert(start_idx, A::additive_identity());
+        heap.push(Reverse((A::additive_identity(), start_idx)));
+
+        while let Some(Reverse((cost_u, u))) = heap.pop() {
+            if cost_u > dist[&u] {
+                continue; // stale entry
+            }
+
+            for edge in self.0.edges(u) {
+                let v = if edge.source() == u {
+                    edge.target()
+                } else {
+                    edge.source()
+                };
+                let edge_weight = edge.weight().clone();
+                let new_cost = A::add(&cost_u, &edge_weight);
+
+                if dist.get(&v).map_or(true, |old_cost| new_cost < *old_cost) {
+                    dist.insert(v, new_cost.clone());
+                    prev.insert(v, u);
+                    heap.push(Reverse((new_cost, v)));
+                    heapify::push_heap(&mut heap);
+                }
+            }
+        }
+
+        // Now convert to output format: HashMap<VectorId, (cost, Option<prev VectorId>)>
+        let mut result = HashMap::new();
+        for (&node_idx, cost) in &dist {
+            let vector_id = *self.0.node_weight(node_idx).unwrap();
+
+            let prev_vector = prev
+                .get(&node_idx)
+                .map(|&pidx| *self.0.node_weight(pidx).unwrap());
+
+            result.insert(vector_id, cost.clone());
+        }
+
+        Ok(result)
     }
 }
 
