@@ -6,7 +6,7 @@ use std::{
 };
 
 use petgraph::{
-    csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, visit::EdgeRef, Undirected,
+    csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, visit::{EdgeRef, IntoEdgeReferences}, Undirected,
 };
 use rancor::Strategy;
 use uuid::Uuid;
@@ -936,6 +936,113 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
         }
 
         Ok(result)
+    }
+
+}
+
+
+pub trait UpdateTree<Strategy, A: Field<A> + Clone + Copy + Debug> {
+    fn update(&mut self, new_vector: VectorId, new_edges: &[(A, VectorId)]) -> Result<Vec<(A, VectorId, VectorId)>, ()>;
+}
+
+pub struct ReConstruct;
+
+impl<A: Field<A> + Clone + Copy + Debug + PartialOrd> UpdateTree<ReConstruct, A> for IntraPartitionGraph<A> {
+    fn update(&mut self, new_vector: VectorId, new_edges: &[(A, VectorId)]) -> Result<Vec<(A, VectorId, VectorId)>, ()> {
+        // 1. Extract current graph & node map
+        let IntraPartitionGraph(ref mut graph, ref mut node_map, _) = self;
+
+        
+        // Collect old edges into a set
+        let old_edges: HashSet<(VectorId, VectorId)> = graph.edge_references()
+            .map(|e| {
+                let a = *graph.node_weight(e.source()).unwrap();
+                let b = *graph.node_weight(e.target()).unwrap();
+                if a < b { (a, b) } else { (b, a) }
+            })
+            .collect();
+
+        // Collect all vertices
+        let mut all_vertices: Vec<VectorId> = graph.node_weights().cloned().collect();
+        all_vertices.push(new_vector);
+
+        // Gather all candidate edges: old MST + new edges
+        let mut edges: Vec<(A, VectorId, VectorId)> = graph.edge_references()
+            .map(|e| {
+                let a = *graph.node_weight(e.source()).unwrap();
+                let b = *graph.node_weight(e.target()).unwrap();
+                (*e.weight(), a, b)
+            })
+            .collect();
+
+        for &(weight, other) in new_edges {
+            edges.push((weight, new_vector, other));
+        }
+
+        // Sort edges by weight
+        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+        // Kruskal's DSU
+        struct DSU {
+            parent: HashMap<VectorId, VectorId>,
+        }
+        impl DSU {
+            fn new(nodes: &[VectorId]) -> Self {
+                Self {
+                    parent: nodes.iter().map(|&v| (v, v)).collect(),
+                }
+            }
+            fn find(&mut self, x: VectorId) -> VectorId {
+                if self.parent[&x] != x {
+                    let root = self.find(self.parent[&x]);
+                    self.parent.insert(x, root);
+                }
+                self.parent[&x]
+            }
+            fn union(&mut self, x: VectorId, y: VectorId) {
+                let px = self.find(x);
+                let py = self.find(y);
+                if px != py {
+                    self.parent.insert(px, py);
+                }
+            }
+        }
+
+        // Build new MST graph
+        let mut new_graph: StableGraph<VectorId, A, Undirected> = StableGraph::default();
+        let mut new_node_map: HashMap<VectorId, NodeIndex> = HashMap::new();
+
+        for &v in &all_vertices {
+            let idx = new_graph.add_node(v);
+            new_node_map.insert(v, idx);
+        }
+
+        let mut dsu = DSU::new(&all_vertices);
+        let mut inserted_edges: Vec<(A, VectorId, VectorId)> = Vec::new();
+        let mut new_edges_only: Vec<(A, VectorId, VectorId)> = Vec::new();
+
+        for (weight, u, v) in edges {
+            if dsu.find(u) != dsu.find(v) {
+                dsu.union(u, v);
+                let u_idx = new_node_map[&u];
+                let v_idx = new_node_map[&v];
+                new_graph.add_edge(u_idx, v_idx, weight);
+
+                inserted_edges.push((weight, u, v));
+
+                // Check if edge didn't exist in old graph
+                let (min, max) = if u < v { (u, v) } else { (v, u) };
+                if !old_edges.contains(&(min, max)) {
+                    new_edges_only.push((weight, u, v));
+                }
+            }
+        }
+
+        // Replace original graph
+        *graph = new_graph;
+        *node_map = new_node_map;
+
+        Ok(new_edges_only)
     }
 }
 
