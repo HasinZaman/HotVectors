@@ -21,6 +21,8 @@ use crate::{
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
+use super::merge::merge_partition_into;
+
 pub struct PartitionSubSet<
     'a,
     A: PartialEq + Clone + Copy + Field<A>,
@@ -570,46 +572,65 @@ impl<
         let mut first_tree_subset = PartitionSubSet::new(partition);
         let mut remaining_points_subset = PartitionSubSet::new(partition);
 
-        // Helper to find the first connected component (tree)
+        let all_partition_ids: Vec<_> = partition.iter().map(|v| v.id).collect();
+        println!("All partition vector IDs: {:?}", all_partition_ids);
+
         let mut found_first_tree = false;
 
         for node in graph.1.keys() {
             if visited_nodes.contains(node) {
                 continue;
             }
+
+            println!("\nStarting new DFS from node: {:?}", node);
             let mut stack = vec![node];
             let mut current_tree_nodes = vec![];
 
             while let Some(current_node) = stack.pop() {
                 if visited_nodes.insert(current_node) {
+                    println!("Visiting node: {:?}", current_node);
                     current_tree_nodes.push(current_node);
 
-                    // Add neighbors for DFS traversal
                     for neighbor in graph.0.neighbors(graph.1[current_node]) {
-                        if !visited_nodes.contains(graph.0.node_weight(neighbor).unwrap()) {
-                            stack.push(graph.0.node_weight(neighbor).unwrap());
+                        let neighbor_id = graph.0.node_weight(neighbor).unwrap();
+                        println!("Neighbor of {:?}: {:?}", current_node, neighbor_id);
+
+                        if !visited_nodes.contains(neighbor_id) {
+                            stack.push(neighbor_id);
                         }
                     }
                 }
             }
 
-            // Populate either the first tree or remaining points
-            if !found_first_tree {
-                for vec_id in current_tree_nodes {
-                    let partition_index = partition
-                        .iter()
-                        .position(|v| v.id == **vec_id)
-                        .expect("Node not found in partition");
-                    first_tree_subset.add(partition_index).unwrap();
-                }
+            println!(
+                "Finished DFS tree, found {} nodes: {:?}",
+                current_tree_nodes.len(),
+                current_tree_nodes
+            );
+
+            let target_subset = if !found_first_tree {
+                println!("Populating first tree subset");
                 found_first_tree = true;
+                &mut first_tree_subset
             } else {
-                for node_index in current_tree_nodes {
-                    let partition_index = partition
-                        .iter()
-                        .position(|v| v.id == **node_index)
-                        .expect("Node not found in partition");
-                    remaining_points_subset.add(partition_index).unwrap();
+                println!("Populating remaining points subset");
+                &mut remaining_points_subset
+            };
+
+            for vec_id in current_tree_nodes {
+                println!("Looking for vector ID in partition: {:?}", vec_id);
+                match partition.iter().position(|v| v.id == **vec_id) {
+                    Some(index) => {
+                        println!("Found at index {}", index);
+                        target_subset.add(index).unwrap();
+                    }
+                    None => {
+                        panic!(
+                            "Error: Node {:?} not found in partition! All IDs: {:?}",
+                            vec_id, all_partition_ids
+                        );
+                        // panic!("Node not found in partition");
+                    }
                 }
             }
         }
@@ -742,7 +763,7 @@ pub fn split_partition<
             .iter()
             // .skip(1)
             .filter(|graph| {
-                !inter_graph.1.contains_key(&graph.2) && graph.2 != PartitionId(target.id)
+                !inter_graph.1.contains_key(&graph.2) // && graph.2 != PartitionId(target.id)
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -770,25 +791,6 @@ pub fn split_partition<
                     }
                 },
             )
-            // .filter(
-            //     |(dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2))| {
-            //         match partition_membership.get(&vector_id_1) {
-            //             Some(0) => false,
-            //             Some(_) => true,
-            //             None => panic!(
-            //             "{vector_id_1:?} not in {partition_membership:#?}\n{:#?}\n{:#?}\n{:#?}\n{:#?}",
-            //             (new_partitions[0].vectors, intra_graphs[0].2),
-            //             (new_partitions[1].vectors, intra_graphs[1].2),
-            //             target.vectors,
-            //             inter_graph
-            //                 .0
-            //                 .edges(inter_graph.1[&PartitionId(target.id)])
-            //                 .map(|edge| edge.weight())
-            //                 .collect::<Vec<_>>()
-            //         ),
-            //         }
-            //     },
-            // )
             .map(
                 |(dist, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2))| {
                     (
@@ -913,14 +915,14 @@ pub fn split_partition_into_trees<
     )>,
     PartitionErr,
 > {
-    let mut result: Vec<(
+    let mut pairs: Vec<(
         Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         IntraPartitionGraph<A>,
     )> = vec![(partition.clone(), graph.clone())];
     let mut i1 = 0;
 
-    while i1 != result.len() {
-        let (partition, graph) = result.get_mut(i1).unwrap();
+    while i1 != pairs.len() {
+        let (partition, graph) = pairs.get_mut(i1).unwrap();
 
         if calculate_number_of_trees(&graph) < 2 {
             i1 += 1;
@@ -937,20 +939,395 @@ pub fn split_partition_into_trees<
         *partition = pair_2.0;
         *graph = pair_2.1;
 
-        result.push(pair_1);
+        pairs.push(pair_1);
     }
 
-    Ok(result)
+    // attempt to collapse pairs
+    let initial_id = pairs[0].0.id;
+
+    let mut id_queue: HashSet<_> = pairs.iter().map(|x| x.0.id).collect();
+    let mut pairs: HashMap<
+        Uuid,
+        (
+            Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+            IntraPartitionGraph<A>,
+        ),
+    > = pairs.into_iter().map(|pair| (pair.0.id, pair)).collect();
+    // collapse in pair[0]
+    {
+        let id = id_queue.take(&initial_id).unwrap();
+
+        loop {
+            let neighbors: Vec<_> = inter_graph
+                .0
+                .edges(inter_graph.1[&PartitionId(id)])
+                .map(|edge_ref| {
+                    let source = inter_graph.0[edge_ref.source()];
+                    let target = inter_graph.0[edge_ref.target()];
+
+                    match source.0 == id {
+                        true => target,
+                        false => source,
+                    }
+                })
+                .filter(|target| id_queue.contains(&target.0))
+                .collect();
+
+            if neighbors.len() == 0 {
+                break;
+            }
+
+            for source in neighbors {
+                let _ = id_queue.take(&source.0);
+                let source = pairs.remove(&source.0).unwrap();
+                let (sink_partition, sink_mst) = &pairs[&initial_id];
+
+                // should work :- the union of subsets should never be greater than initial set -> no overflow
+                // :- we already checked if the partitions are connected
+                pairs.insert(
+                    initial_id,
+                    merge_partition_into(
+                        (sink_partition, sink_mst),
+                        (&source.0, &source.1),
+                        inter_graph,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+    }
+
+    if id_queue.len() > 0 {
+        while let Some(id) = id_queue.iter().cloned().next() {
+            let id = id_queue.take(&id).unwrap();
+            loop {
+                let neighbors: Vec<_> = inter_graph
+                    .0
+                    .edges(inter_graph.1[&PartitionId(id)])
+                    .map(|edge_ref| {
+                        let source = inter_graph.0[edge_ref.source()];
+                        let target = inter_graph.0[edge_ref.target()];
+
+                        match source.0 == id {
+                            true => target,
+                            false => source,
+                        }
+                    })
+                    .filter(|target| id_queue.contains(&target.0))
+                    .collect();
+
+                if neighbors.len() == 0 {
+                    break;
+                }
+
+                for source in neighbors {
+                    let _ = id_queue.take(&source.0);
+                    let (source_partition, source_mst) = pairs.remove(&source.0).unwrap();
+                    let (sink_partition, sink_mst) = &pairs[&initial_id];
+
+                    pairs.insert(
+                        initial_id,
+                        merge_partition_into(
+                            (sink_partition, sink_mst),
+                            (&source_partition, &source_mst),
+                            inter_graph,
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+        }
+    }
+
+    Ok([pairs.remove(&initial_id).unwrap()]
+        .into_iter()
+        .chain(pairs.into_iter().map(|(_, pair)| pair))
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{marker::PhantomData, str::FromStr};
+    use std::{collections::VecDeque, marker::PhantomData, str::FromStr};
 
     use uuid::Uuid;
 
     use super::*;
     use crate::{db::component::partition::VectorEntry, vector::Vector};
+
+    struct DummyBFSManualSplit<const N: usize>;
+
+    impl<
+            A: PartialEq + Clone + Copy + Field<A> + PartialOrd + Debug,
+            B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>> + Extremes,
+            const PARTITION_CAP: usize,
+            const VECTOR_CAP: usize,
+            const N: usize,
+        > SplitStrategy<A, B, PARTITION_CAP, VECTOR_CAP> for DummyBFSManualSplit<N>
+    {
+        fn split<'a>(
+            target: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+            graph: &'a IntraPartitionGraph<A>,
+        ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] {
+            let mut visited = HashSet::new();
+            let mut stack = VecDeque::new();
+            let mut part1 = PartitionSubSet::new(target);
+            let mut part2 = PartitionSubSet::new(target);
+
+            let vec_to_idx: HashMap<VectorId, usize> = target
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (VectorId(v.id), i))
+                .collect();
+
+            // Start from the first vector in the target
+            if let Some(first_vector) = target.iter().next() {
+                let start_id = VectorId(first_vector.id);
+                stack.push_back(start_id);
+
+                while let Some(current) = stack.pop_front() {
+                    if visited.contains(&current) {
+                        continue;
+                    }
+                    visited.insert(current);
+
+                    if let Some(&idx) = vec_to_idx.get(&current) {
+                        if part1.size < N {
+                            part1.add(idx).unwrap();
+                        } else {
+                            part2.add(idx).unwrap();
+                        }
+
+                        for neighbor in graph
+                            .0
+                            .neighbors(graph.1[&current])
+                            .map(|n| graph.0.node_weight(n).unwrap())
+                        {
+                            if !visited.contains(neighbor) {
+                                stack.push_back(*neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Anything left unvisited goes to partition 2
+            for (i, vec) in target.iter().enumerate() {
+                let id = VectorId(vec.id);
+                if !visited.contains(&id) {
+                    part2.add(i).unwrap();
+                }
+            }
+
+            part1.id = target.id;
+            [part1, part2]
+        }
+    }
+
+    #[test]
+    fn test_split_size_1() {
+        let vectors = vec![
+            VectorEntry {
+                vector: Vector([0.92162, 0.15653355]),
+                id: Uuid::from_str("1926289c-4b15-4683-93e0-733a1cff8d0d").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.8563366, 0.06344742]),
+                id: Uuid::from_str("c070aa1f-7ec6-447b-a4ee-a7fb062950df").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.87333435, 0.10792838]),
+                id: Uuid::from_str("bab0862b-33d5-4e8d-a9b2-0e13510e8eb7").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.904121, 0.14064054]),
+                id: Uuid::from_str("577c353a-fb29-442c-8127-524ff1680efc").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.8634496, 0.048130006]),
+                id: Uuid::from_str("de60cba1-ae9b-4303-b213-cdaabd6d14bf").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.704498, 0.6998113]),
+                id: Uuid::from_str("5b3f398a-b640-4eb8-b468-cba3b1ade5d9").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.5392826, 0.6072107]),
+                id: Uuid::from_str("7086aba4-5d2e-43e6-8e84-6653da6a5eb0").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.5484414, 0.5518184]),
+                id: Uuid::from_str("35928ca9-372e-433c-a70a-9223b4e83c00").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.45432913, 0.55870813]),
+                id: Uuid::from_str("581b542f-1645-483c-b4b5-5bfcb62ce08d").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.4408836, 0.5238235]),
+                id: Uuid::from_str("c90e7bc5-e439-4561-9d9a-6f4ff103a2f7").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.5484165, 0.56746066]),
+                id: Uuid::from_str("bb055eb8-56ec-4933-88d0-b69dfb1223b6").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.10779287, 0.11290348]),
+                id: Uuid::from_str("77dae981-1a88-4907-8471-4f0ac020faad").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.5125989, 0.53425103]),
+                id: Uuid::from_str("47ce4c45-d6de-4de2-bd63-90b29ff6c786").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.4696728, 0.52770525]),
+                id: Uuid::from_str("9a1a07cc-315c-4ba1-ab98-81a9dd7be601").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.46052048, 0.5586407]),
+                id: Uuid::from_str("bd169baf-a42a-40e2-839f-e5e6217acbcb").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.4390052, 0.50848174]),
+                id: Uuid::from_str("b7ea8823-4827-4729-92c5-30753fc32b72").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.50311416, 0.6384853]),
+                id: Uuid::from_str("589ed7b2-846d-4f91-a07a-d631bcd41148").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.44561064, 0.29694903]),
+                id: Uuid::from_str("0798dbd3-3522-4f14-89e0-4bc3818d825e").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.2946079, 0.3537509]),
+                id: Uuid::from_str("c376134c-1429-4e6b-a355-d8c3ebb50511").unwrap(),
+                _phantom_data: PhantomData,
+            },
+            VectorEntry {
+                vector: Vector([0.106322125, 0.11829137]),
+                id: Uuid::from_str("f98a5f12-9f9e-435d-911c-fb5658d0bb96").unwrap(),
+                _phantom_data: PhantomData,
+            },
+        ];
+
+        let edges = vec![
+            (
+                0.005585020099079774,
+                Uuid::from_str("77dae981-1a88-4907-8471-4f0ac020faad").unwrap(),
+                Uuid::from_str("f98a5f12-9f9e-435d-911c-fb5658d0bb96").unwrap(),
+            ),
+            (
+                0.006191717179216102,
+                Uuid::from_str("581b542f-1645-483c-b4b5-5bfcb62ce08d").unwrap(),
+                Uuid::from_str("bd169baf-a42a-40e2-839f-e5e6217acbcb").unwrap(),
+            ),
+            (
+                0.015456325127843276,
+                Uuid::from_str("c90e7bc5-e439-4561-9d9a-6f4ff103a2f7").unwrap(),
+                Uuid::from_str("b7ea8823-4827-4729-92c5-30753fc32b72").unwrap(),
+            ),
+            (
+                0.015642279818415126,
+                Uuid::from_str("35928ca9-372e-433c-a70a-9223b4e83c00").unwrap(),
+                Uuid::from_str("bb055eb8-56ec-4933-88d0-b69dfb1223b6").unwrap(),
+            ),
+            (
+                0.016888396627489435,
+                Uuid::from_str("c070aa1f-7ec6-447b-a4ee-a7fb062950df").unwrap(),
+                Uuid::from_str("de60cba1-ae9b-4303-b213-cdaabd6d14bf").unwrap(),
+            ),
+            (
+                0.023639009451753703,
+                Uuid::from_str("1926289c-4b15-4683-93e0-733a1cff8d0d").unwrap(),
+                Uuid::from_str("577c353a-fb29-442c-8127-524ff1680efc").unwrap(),
+            ),
+            (
+                0.029049716344613435,
+                Uuid::from_str("c90e7bc5-e439-4561-9d9a-6f4ff103a2f7").unwrap(),
+                Uuid::from_str("9a1a07cc-315c-4ba1-ab98-81a9dd7be601").unwrap(),
+            ),
+            (
+                0.032260921066902266,
+                Uuid::from_str("9a1a07cc-315c-4ba1-ab98-81a9dd7be601").unwrap(),
+                Uuid::from_str("bd169baf-a42a-40e2-839f-e5e6217acbcb").unwrap(),
+            ),
+            (
+                0.03991612825621872,
+                Uuid::from_str("35928ca9-372e-433c-a70a-9223b4e83c00").unwrap(),
+                Uuid::from_str("47ce4c45-d6de-4de2-bd63-90b29ff6c786").unwrap(),
+            ),
+            (
+                0.04078595112549913,
+                Uuid::from_str("7086aba4-5d2e-43e6-8e84-6653da6a5eb0").unwrap(),
+                Uuid::from_str("bb055eb8-56ec-4933-88d0-b69dfb1223b6").unwrap(),
+            ),
+            (
+                0.04342231335406252,
+                Uuid::from_str("47ce4c45-d6de-4de2-bd63-90b29ff6c786").unwrap(),
+                Uuid::from_str("9a1a07cc-315c-4ba1-ab98-81a9dd7be601").unwrap(),
+            ),
+            (
+                0.04492107779303715,
+                Uuid::from_str("bab0862b-33d5-4e8d-a9b2-0e13510e8eb7").unwrap(),
+                Uuid::from_str("577c353a-fb29-442c-8127-524ff1680efc").unwrap(),
+            ),
+            (
+                0.04761805652884314,
+                Uuid::from_str("c070aa1f-7ec6-447b-a4ee-a7fb062950df").unwrap(),
+                Uuid::from_str("bab0862b-33d5-4e8d-a9b2-0e13510e8eb7").unwrap(),
+            ),
+            (
+                0.04781481629363016,
+                Uuid::from_str("7086aba4-5d2e-43e6-8e84-6653da6a5eb0").unwrap(),
+                Uuid::from_str("589ed7b2-846d-4f91-a07a-d631bcd41148").unwrap(),
+            ),
+            (
+                0.16133282345203193,
+                Uuid::from_str("0798dbd3-3522-4f14-89e0-4bc3818d825e").unwrap(),
+                Uuid::from_str("c376134c-1429-4e6b-a355-d8c3ebb50511").unwrap(),
+            ),
+            (
+                0.189396408407129,
+                Uuid::from_str("5b3f398a-b640-4eb8-b468-cba3b1ade5d9").unwrap(),
+                Uuid::from_str("7086aba4-5d2e-43e6-8e84-6653da6a5eb0").unwrap(),
+            ),
+            (
+                0.21163581747317184,
+                Uuid::from_str("b7ea8823-4827-4729-92c5-30753fc32b72").unwrap(),
+                Uuid::from_str("0798dbd3-3522-4f14-89e0-4bc3818d825e").unwrap(),
+            ),
+            (
+                0.3014842008052354,
+                Uuid::from_str("c376134c-1429-4e6b-a355-d8c3ebb50511").unwrap(),
+                Uuid::from_str("f98a5f12-9f9e-435d-911c-fb5658d0bb96").unwrap(),
+            ),
+            (
+                0.467628461732802,
+                Uuid::from_str("bab0862b-33d5-4e8d-a9b2-0e13510e8eb7").unwrap(),
+                Uuid::from_str("0798dbd3-3522-4f14-89e0-4bc3818d825e").unwrap(),
+            ),
+        ];
+
+        split_partition_test::<DummyBFSManualSplit<1>>(vectors.clone(), edges.clone());
+    }
 
     fn split_partition_test<S: SplitStrategy<f32, Vector<f32, 2>, 20, 10>>(
         vectors: Vec<VectorEntry<f32, Vector<f32, 2>>>,
