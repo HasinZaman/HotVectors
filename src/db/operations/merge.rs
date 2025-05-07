@@ -1,5 +1,5 @@
 use petgraph::visit::EdgeRef;
-use std::{error::Error, fmt::Debug};
+use std::fmt::Debug;
 
 use crate::{
     db::component::{
@@ -13,7 +13,7 @@ use crate::{
 #[derive(Debug)]
 pub enum MergeError {
     Overflow,
-    NotConnected
+    NotConnected,
 }
 
 pub fn merge_partition_into<
@@ -44,7 +44,7 @@ pub fn merge_partition_into<
 
     // check if both partitions are connected
     let (weight, (partition_id_1, vector_id_1), (partition_id_2, vector_id_2)) = {
-        let Some(source_idx) = inter_graph.1.get(&PartitionId(source_partition.id)) else {
+        let Some(source_idx) = inter_graph.1.get(&PartitionId(sink_partition.id)) else {
             todo!()
         };
 
@@ -56,7 +56,7 @@ pub fn merge_partition_into<
                 let edge_target = inter_graph.0[edge_ref.target()];
 
                 (sink_partition.id == edge_source.0 && source_partition.id == edge_target.0)
-                    || (sink_partition.id == edge_source.0 && source_partition.id == edge_target.0)
+                    || (sink_partition.id == edge_target.0 && source_partition.id == edge_source.0)
             })
             .map(|edge_ref| edge_ref.weight())
             .next();
@@ -112,36 +112,36 @@ pub fn merge_partition_into<
         delete_edges.push(*weight);
     }
 
-    for (weight, (source_partition, source_vector), (target_partition, target_vector)) in
+    for (weight, (source_partition_id, source_vector_id), (target_partition_id, target_vector_id)) in
         delete_edges
     {
         let _ = inter_graph
             .remove_edge(
-                (source_partition, source_vector),
-                (target_partition, target_vector),
+                (source_partition_id, source_vector_id),
+                (target_partition_id, target_vector_id),
             )
             .unwrap();
 
-        match *source_partition == *source_mst.2 {
+        match *source_partition_id == source_partition.id {
             true => {
                 inter_graph.add_edge(
                     PartitionId(sink_partition.id),
-                    target_partition,
+                    target_partition_id,
                     (
                         weight,
-                        (source_partition, source_vector),
-                        (target_partition, target_vector),
+                        (PartitionId(sink_partition.id), source_vector_id),
+                        (target_partition_id, target_vector_id),
                     ),
                 );
             }
             false => {
                 inter_graph.add_edge(
-                    source_partition,
+                    source_partition_id,
                     PartitionId(sink_partition.id),
                     (
                         weight,
-                        (source_partition, source_vector),
-                        (target_partition, target_vector),
+                        (source_partition_id, source_vector_id),
+                        (PartitionId(sink_partition.id), target_vector_id),
                     ),
                 );
             }

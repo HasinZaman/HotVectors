@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use petgraph::visit::EdgeRef;
 use spade::{DelaunayTriangulation, HasPosition, Triangulation};
 use tokio::sync::{mpsc::Sender, oneshot, RwLock};
 use tracing::{event, Level};
@@ -41,6 +42,7 @@ use crate::{
         },
         operations::{
             cluster::{remove_cluster_edge, update_cluster},
+            merge::{merge_partition_into, MergeError},
             split::{
                 calculate_number_of_trees, split_partition, split_partition_into_trees,
                 FirstTreeSplitStrategy, KMean, MaxAttempt, BFS,
@@ -462,7 +464,7 @@ where
 
         let (tx, rx) = oneshot::channel();
 
-        access_tx
+        let _ = access_tx
             .send(BankerMessage::RequestAccess {
                 transaction_id,
                 partitions: read_partitions
@@ -570,8 +572,6 @@ where
                     local_inter_graph.add_edge(start.0, end.0, (*weight, *start, *end));
                 }
             }
-
-            println!("Local copy:{acquired_partitions:?}\nWrite partitions:{write_partitions:?}\n{local_inter_graph:#?}");
 
             local_inter_graph
         };
@@ -782,7 +782,7 @@ where
         local_data.centroid = partition.centroid();
     }
 
-    //update min_spanning
+    // update min_spanning
     println!("{:?} :- Update MST", new_vector.id);
     'update_min_span: {
         #[cfg(feature = "benchmark")]
@@ -1665,6 +1665,110 @@ where
         }
     }
 
+    // merge splits
+    {
+        for sink_id in &write_partitions {
+            let mut delete_ids = Vec::new();
+
+            let sink_partition = resolve_buffer!(ACCESS, local_partition_buffer, *sink_id);
+            let Some(sink_partition) = &mut *sink_partition.write().await else {
+                todo!()
+            };
+            let sink_mst = resolve_buffer!(ACCESS, local_mst_buffer, *sink_id);
+            let Some(sink_mst) = &mut *sink_mst.write().await else {
+                todo!()
+            };
+            {
+                let data = &mut *local_meta_data[&*sink_id].write().await;
+
+                'bfs_loop: loop {
+                    // bfs from sink
+                    let neighbors: Vec<_> = local_inter_graph
+                        .0
+                        .edges(local_inter_graph.1[sink_id])
+                        .map(|edge_ref| {
+                            let source = local_inter_graph.0[edge_ref.source()];
+                            let target = local_inter_graph.0[edge_ref.target()];
+
+                            match source.0 == **sink_id {
+                                true => target,
+                                false => source,
+                            }
+                        })
+                        .filter(|target| !write_partitions.contains(&PartitionId(target.0)))
+                        .filter(|target| !read_partitions.contains(&PartitionId(target.0)))
+                        .collect();
+
+                    if neighbors.len() == 0 {
+                        break 'bfs_loop;
+                    }
+
+                    // update sink
+                    for source_id in neighbors {
+                        let result = {
+                            // println!("Getting source partition :- {source_id:?}");
+                            let source_partition = resolve_buffer!(
+                                ACCESS,
+                                local_partition_buffer,
+                                source_id,
+                                [**sink_id]
+                            );
+                            let Some(source_partition) = &*source_partition.read().await else {
+                                todo!()
+                            };
+
+                            // println!("Getting source mst :- {source_id:?}");
+                            let source_mst =
+                                resolve_buffer!(ACCESS, local_mst_buffer, source_id, [**sink_id]);
+                            let Some(source_mst) = &*source_mst.read().await else {
+                                todo!()
+                            };
+                            // println!("{acquired_partitions:?}\n{local_inter_graph:#?}\n{sink_partition:#?}\n{source_partition:#?}");
+
+                            merge_partition_into(
+                                (&sink_partition, &sink_mst),
+                                (&source_partition, &source_mst),
+                                &mut local_inter_graph,
+                            )
+                        };
+
+                        match result {
+                            Ok((new_partition, new_mst)) => {
+                                // println!("{new_partition:#?}");
+
+                                *sink_partition = new_partition;
+                                *sink_mst = new_mst;
+
+                                data.size = sink_partition.size;
+                                data.centroid = sink_partition.centroid();
+                                // data.edge_length = (
+                                //     A::min(data.edge_length.0, ),
+                                //     A::max(data.edge_length.1, )
+                                // )
+
+                                delete_ids.push(*source_id);
+                                let _ = local_partition_buffer
+                                    .delete_value(&*source_id)
+                                    .await
+                                    .unwrap();
+                                let _ = local_mst_buffer.delete_value(&*source_id).await.unwrap();
+                            }
+                            Err(MergeError::Overflow) => {
+                                break 'bfs_loop;
+                            }
+                            _ => {
+                                todo!()
+                            },
+                        }
+                    }
+                }
+            }
+            for id in delete_ids {
+                local_meta_data.remove(&id);
+            }
+        }
+    }
+
     // update global using local data
     println!("{:?} :- Update global", new_vector.id);
     {
@@ -1770,12 +1874,13 @@ where
     }
 
     println!("{:?} :- Release acquired_partitions", new_vector.id);
-    access_tx
+    let _ = access_tx
         .send(BankerMessage::ReleaseAccess {
             transaction_id,
             partitions: acquired_partitions.iter().map(|x| *x).collect(),
         })
-        .await;
+        .await
+        .unwrap();
 
     Ok(())
 }
