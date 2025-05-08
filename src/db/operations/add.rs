@@ -1,5 +1,5 @@
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Debug,
     fs,
@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use heapify::{make_heap, pop_heap};
 use petgraph::visit::EdgeRef;
 use spade::{DelaunayTriangulation, HasPosition, Triangulation};
 use tokio::sync::{mpsc::Sender, oneshot, RwLock};
@@ -508,7 +509,11 @@ where
             }
         };
     };
+    
+    #[cfg(feature = "benchmark")]
+    let _child_benchmark = Benchmark::spawn_child("Total Insertion time".to_string(), &benchmark);
 
+    
     let read_partitions: HashSet<_> = acquired_partitions
         .difference(&write_partitions)
         .map(|x| *x)
@@ -819,19 +824,20 @@ where
         // might not be required
         let mut dist_map = cached_dist_map;
 
-        let (mut vec_to_partition, mut partition_to_vectors) = {
+        // let (mut vec_to_partition, mut partition_to_vectors) =
+        {
             #[cfg(feature = "benchmark")]
             let _child_benchmark =
                 Benchmark::spawn_child("Generate distance map".to_string(), &_child_benchmark);
 
-            let mut vec_to_partition: HashMap<VectorId, PartitionId> = HashMap::new();
-            let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
-            for (vector_id, partition_id) in &vec_to_partition {
-                partition_to_vectors
-                    .entry(*partition_id)
-                    .or_insert_with(HashSet::new)
-                    .insert(*vector_id);
-            }
+            // let mut vec_to_partition: HashMap<VectorId, PartitionId> = HashMap::new();
+            // let mut partition_to_vectors: HashMap<PartitionId, HashSet<VectorId>> = HashMap::new();
+            // for (vector_id, partition_id) in &vec_to_partition {
+            //     partition_to_vectors
+            //         .entry(*partition_id)
+            //         .or_insert_with(HashSet::new)
+            //         .insert(*vector_id);
+            // }
 
             let mut missing_partitions = [closet_partition_id]
                 .into_iter()
@@ -952,7 +958,7 @@ where
 
             dist_map.remove(&VectorId(new_vector.id));
 
-            (vec_to_partition, partition_to_vectors)
+            // (vec_to_partition, partition_to_vectors)
         };
 
         // println!("{:#?}", dist_map);
@@ -1768,7 +1774,7 @@ where
             }
         }
     }
-
+    
     // update global using local data
     println!("{:?} :- Update global", new_vector.id);
     {
