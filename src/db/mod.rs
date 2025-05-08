@@ -15,9 +15,10 @@ use crate::vector::VectorSerial;
 #[cfg(feature = "benchmark")]
 use component::benchmark::{benchmark_logger, Benchmark, BenchmarkId};
 
+use banker::banker;
 use component::{
     cluster::ClusterSet,
-    data_buffer::DataBuffer,
+    data_buffer::{DataBuffer, Global},
     graph::{GraphSerial, InterGraphSerial, InterPartitionGraph, IntraPartitionGraph},
     ids::{ClusterId, PartitionId, VectorId},
     meta::Meta,
@@ -46,7 +47,7 @@ use spade::HasPosition;
 use tokio::{
     join, runtime,
     sync::{
-        mpsc::{Receiver, Sender},
+        mpsc::{self, Receiver, Sender},
         Notify, RwLock,
     },
     time::sleep,
@@ -56,6 +57,7 @@ use uuid::Uuid;
 
 use crate::vector::{Extremes, Field, VectorSpace};
 
+mod banker;
 pub mod component;
 pub mod log;
 pub mod operations;
@@ -263,11 +265,13 @@ where
     let partition_buffer = Arc::new(RwLock::new(DataBuffer::<
         Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         PartitionSerial<A>,
+        Global,
         MAX_LOADED,
     >::new(PARTITION_DIR.into())));
     let min_spanning_tree_buffer = Arc::new(RwLock::new(DataBuffer::<
         IntraPartitionGraph<A>,
         GraphSerial<A>,
+        Global,
         MAX_LOADED,
     >::new(MIN_SPAN_DIR.into())));
     let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
@@ -279,8 +283,8 @@ where
     // check if file environment
     event!(Level::INFO, "FILE CHECK🗄️🗄️");
     let all_initialized: &[bool] = &[
-        dir_initialized_with_files(PARTITION_DIR),
-        dir_initialized_with_files(MIN_SPAN_DIR),
+        // dir_initialized_with_files(PARTITION_DIR),
+        // dir_initialized_with_files(MIN_SPAN_DIR),
         dir_initialized_with_files(META_DATA_DIR),
         dir_initialized_with_files(CLUSTER_DATA_DIR),
         file_exists(
@@ -303,6 +307,11 @@ where
         .enable_time()
         .build()
         .unwrap();
+
+    let (access_tx, rx) = tokio::sync::mpsc::channel(64);
+    rt.spawn(async move {
+        banker(rx).await;
+    });
 
     rt.block_on(async {
         #[cfg(feature = "benchmark")]
@@ -540,6 +549,8 @@ where
 
                             let notify_update = notify_update.clone();
 
+                            let access_tx = access_tx.clone();
+
                             #[cfg(feature = "benchmark")]
                             let benchmark_writer = benchmark_writer.clone();
 
@@ -548,11 +559,13 @@ where
 
                                 match add(
                                     value,
-                                    inter_spanning_graph,
+                                    None,
+                                    meta_data,
                                     partition_buffer,
                                     min_spanning_tree_buffer,
-                                    meta_data,
+                                    inter_spanning_graph,
                                     cluster_sets,
+                                    access_tx,
                                     #[cfg(feature = "benchmark")]
                                     Benchmark::new("Insert Vector".to_string(), benchmark_writer),
                                 )
@@ -567,6 +580,12 @@ where
 
                                 // let _ = sender.send(Response::Success);
                                 println!("(Done) Insert Vector :- {vector:?}");
+                                tx.send(Response::Success(Success::Vector(
+                                    VectorId(id),
+                                    vector.into(),
+                                )))
+                                .await
+                                .unwrap();
                                 tx.send(Response::Done).await.unwrap();
 
                                 notify_update.notify_waiters();
