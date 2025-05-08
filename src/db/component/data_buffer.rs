@@ -1,5 +1,16 @@
 use std::{
-    array, cmp::Ordering, collections::HashMap, error::Error, fmt::Display, fs, marker::PhantomData, mem::{self, swap}, path::PathBuf, str::FromStr, sync::Arc
+    array,
+    cmp::Ordering,
+    collections::HashMap,
+    error::Error,
+    fmt::Display,
+    fs,
+    io::ErrorKind,
+    marker::PhantomData,
+    mem::{self, swap},
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
 };
 
 use heapify::{make_heap_with, pop_heap_with};
@@ -443,6 +454,34 @@ where
         Ok(())
     }
 
+    pub async fn delete_value(&mut self, id: &Uuid) -> Result<(), BufferError> {
+        if let Err(err) = self.remove(id).await {
+            println!("Attempted to drop {:?} from data buffer but {:?}", id, err);
+            if err != BufferError::DataNotFound {
+                return Err(err);
+            }
+        };
+
+        println!("delete: {}/{}.{}",
+            self.source,
+            id.to_string(),
+            B::extension()
+        );
+
+        match fs::remove_file(&format!(
+            "{}/{}.{}",
+            self.source,
+            id.to_string(),
+            B::extension()
+        )) {
+            Ok(_) => Ok(()),
+            Err(e) => match e.kind() {
+                ErrorKind::NotFound => Ok(()),
+                _ => todo!(),
+            },
+        }
+    }
+
     pub async fn unload(&mut self, id: &Uuid) -> Result<(), BufferError> {
         event!(Level::INFO, "unload :- id {}", id);
         // get access to all locks
@@ -786,7 +825,8 @@ where
 
     for path in fs::read_dir(&source_buffer.source).unwrap() {
         // Construct paths
-        let id = Uuid::from_str(path.unwrap().path().file_stem().unwrap().to_str().unwrap()).unwrap();
+        let id =
+            Uuid::from_str(path.unwrap().path().file_stem().unwrap().to_str().unwrap()).unwrap();
 
         let data = resolve_buffer!(ACCESS, source_buffer, PartitionId(id));
         let Some(data) = &mut *data.write().await else {

@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     db::{
         component::{
-            data_buffer::{BufferError, DataBuffer},
+            data_buffer::{BufferError, DataBuffer, Global},
             graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
             ids::{PartitionId, VectorId},
             meta::Meta,
@@ -96,7 +96,12 @@ pub async fn stream_vectors_from_partition<
     meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
     partition_buffer: Arc<
         RwLock<
-            DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
+            DataBuffer<
+                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                PartitionSerial<A>,
+                Global,
+                MAX_LOADED,
+            >,
         >,
     >,
     sender: &Sender<Response<A>>,
@@ -265,7 +270,7 @@ pub async fn stream_partition_graph<
     requested_partition: PartitionId,
     meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
     min_spanning_tree_buffer: Arc<
-        RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, MAX_LOADED>>,
+        RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, Global, MAX_LOADED>>,
     >,
     sender: &Sender<Response<A>>,
 ) -> Result<(), ()>
