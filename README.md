@@ -39,4 +39,3 @@ Hot Vectors is a vector database designed with native hierarchical clustering an
 ### Better Neighbor Detection
 - [Efficient Delaunay Triangulation](https://dl.acm.org/doi/pdf/10.1145/220279.220286): Discusses sequential algorithms for constructing Delaunay triangulations, comparing divide-and-conquer, sweepline, and incremental approaches.Covers techniques for improving the accuracy and speed of nearest neighbor searches, a core component of vector databases.
 - [Approximate UMAP for Real-Time Projections](https://arxiv.org/pdf/2404.04001): Introduces a novel variant of UMAP (aUMAP) designed for rapid, real-time data projections, significantly reducing computational costs while maintaining accuracy.A research paper detailing the latest methodologies in neighbor detection, which can enhance clustering and search performance.
-

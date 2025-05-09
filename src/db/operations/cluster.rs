@@ -14,14 +14,19 @@ use rkyv::{
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, Deserialize,
 };
-use tokio::sync::RwLock;
+use tokio::{spawn, sync::RwLock};
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use crate::{
     db::component::{
+<<<<<<< Updated upstream
         cluster::ClusterSet,
         data_buffer::DataBuffer,
+=======
+        cluster::{self, ClusterSet},
+        data_buffer::{DataBuffer, Global},
+>>>>>>> Stashed changes
         graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
         ids::{PartitionId, VectorId},
         meta::Meta,
@@ -76,7 +81,7 @@ pub async fn build_clusters<
             let meta_data = &*meta_data.read().await;
             let inter_graph = &*inter_graph.read().await;
 
-            let mut cluster_set = ClusterSet::new(threshold).await;
+            let mut cluster_set = ClusterSet::new(threshold, "data/clusters/".to_string()).await;
 
             // should find first partition with vectors
             let partition_id = *meta_data.iter().next().unwrap().0;
@@ -307,6 +312,21 @@ pub async fn build_clusters<
     info!("Finished building clusters.");
 }
 
+pub async fn create_local<A: PartialOrd + Field<A> + Debug + Clone + Into<f32>>(
+    cluster_sets: &[ClusterSet<A>],
+    vectors: &[VectorId],
+    transaction_id: Uuid,
+) -> Vec<ClusterSet<A>> {
+    let mut local_sets = Vec::new();
+
+    for cluster_set in cluster_sets {
+        let local = cluster_set.create_local(vectors, transaction_id).await;
+
+        local_sets.push(local);
+    }
+
+    local_sets
+}
 pub async fn update_cluster<A: PartialOrd + Field<A> + Debug + Clone + Into<f32>>(
     cluster_sets: &mut Vec<ClusterSet<A>>,
     dist: &A,

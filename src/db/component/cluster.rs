@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, fmt::Debug, str::FromStr, time::Duration};
+use std::{cmp::Ordering, collections::HashSet, fmt::Debug, str::FromStr, time::Duration};
 
-use async_sqlite::{Client, ClientBuilder, JournalMode};
+use async_sqlite::{rusqlite::params_from_iter, Client, ClientBuilder, JournalMode};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -8,7 +8,7 @@ use rkyv::{
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, Deserialize, Serialize,
 };
-use tokio::fs::read_dir;
+use tokio::{fs::read_dir, sync::oneshot};
 use uuid::Uuid;
 
 use crate::vector::Field;
@@ -162,10 +162,10 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
         }
     }
 
-    pub async fn new(threshold: A) -> Self {
+    pub async fn new(threshold: A, dir: String) -> Self {
         let id = Uuid::new_v4();
         let conn = ClientBuilder::new()
-            .path(&format!("data/clusters//{}.db", id.to_string()))
+            .path(&format!("{}/{}.db", dir, id.to_string()))
             .journal_mode(JournalMode::Memory)
             .open()
             .await
@@ -193,6 +193,158 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
 
             conn,
         }
+    }
+
+    pub async fn create_local(&self, vectors: &[VectorId], transaction_id: Uuid) -> Self {
+        let local = Self::new(
+            self.threshold.clone(),
+            format!("data/local/{}/clusters", transaction_id.to_string()),
+        )
+        .await;
+
+        // get all cluster ids from vectorId
+        let vector_ids: Vec<_> = vectors.into();
+        let (cluster_meta, clusters, cluster_edges) = self
+            .conn
+            .conn(move |conn| {
+                conn.execute("BEGIN TRANSACTION", [])?;
+
+                // get cluster
+                let cluster_ids = {
+                    let placeholders = std::iter::repeat("?")
+                        .take(vector_ids.len())
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    let query = format!(
+                        "SELECT DISTINCT cluster_id FROM Clusters WHERE vector_id IN ({})",
+                        placeholders
+                    );
+
+                    let mut stmt = conn.prepare(&query)?;
+                    let rows = stmt.query_map(
+                        params_from_iter(vector_ids.iter().map(|x| (**x).to_string())),
+                        |row| row.get::<_, String>(0),
+                    )?;
+
+                    let mut cluster_ids = HashSet::new();
+                    for row in rows {
+                        cluster_ids.insert(row?);
+                    }
+
+                    cluster_ids
+                };
+
+                let cluster_meta = {
+                    let mut cluster_meta = Vec::new();
+                    // get cluster meta
+                    for id in cluster_ids.iter() {
+                        let mut stmt =
+                            conn.prepare("SELECT * FROM ClusterMeta WHERE cluster_id = ?")?;
+
+                        let rows = stmt.query_map([id], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, u64>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        })?;
+
+                        for row in rows {
+                            cluster_meta.push(row?);
+                        }
+                    }
+
+                    cluster_meta
+                };
+
+                let clusters = {
+                    let mut clusters = Vec::new();
+                    // get cluster meta
+                    for id in cluster_ids.iter() {
+                        let mut stmt =
+                            conn.prepare("SELECT * FROM Clusters WHERE cluster_id = ?")?;
+
+                        let rows = stmt.query_map([id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })?;
+
+                        for row in rows {
+                            clusters.push(row?);
+                        }
+                    }
+
+                    clusters
+                };
+
+                let cluster_edges = {
+                    let mut cluster_edges = Vec::new();
+                    // get cluster meta
+                    for (id, _) in clusters.iter() {
+                        let mut stmt = conn
+                            .prepare("SELECT * FROM ClusterEdge WHERE source = ? OR target = ?")?;
+
+                        let rows = stmt.query_map([id, id], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        })?;
+
+                        for row in rows {
+                            cluster_edges.push(row?);
+                        }
+                    }
+
+                    cluster_edges
+                };
+
+                conn.execute("COMMIT", [])?;
+
+                Ok((cluster_meta, clusters, cluster_edges))
+            })
+            .await
+            .unwrap();
+
+        let _ = local
+            .conn
+            .conn(move |conn| {
+                conn.execute("BEGIN TRANSACTION", [])?;
+
+                {
+                    let mut stmt = conn.prepare(
+                        "INSERT INTO ClusterMeta (cluster_id, size, merged_into) VALUES (?, ?, ?)",
+                    )?;
+                    for (cluster_id, size, merged_into) in cluster_meta.iter() {
+                        stmt.execute((cluster_id, &size.to_string(), merged_into))?;
+                    }
+                }
+
+                {
+                    let mut stmt =
+                        conn.prepare("INSERT INTO Clusters (cluster_id, vector_id) VALUES (?, ?)")?;
+                    for (cluster_id, vector_id) in clusters.iter() {
+                        stmt.execute([cluster_id, vector_id])?;
+                    }
+                }
+
+                {
+                    let mut stmt = conn.prepare(
+                        "INSERT INTO ClusterEdge (source, target, weight) VALUES (?, ?, ?)",
+                    )?;
+                    for (source, target, weight) in cluster_edges.iter() {
+                        stmt.execute((source, target, weight))?;
+                    }
+                }
+
+                conn.execute("COMMIT", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        local
     }
 
     pub async fn save(&self, dir: &str, name: &str)
@@ -499,6 +651,7 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                     let mut stmt = conn
                         .prepare("SELECT merged_into FROM ClusterMeta WHERE cluster_id = ? AND merged_into != NULL")
                         .expect("Failed to prepare statement");
+                    
                     let result: Option<String> = stmt
                         .query_row([id.0.to_string()], |row| {
                         
@@ -507,12 +660,9 @@ impl<A: Field<A> + Debug + Clone> ClusterSet<A> {
                         })
                         .ok()
                         .flatten();
-                    // println!("{:?}", result);
-
-
-                    
 
                     let id = result.unwrap_or(id.0.to_string());
+
                     // println!("{:?}", id);
                     // let merged_cluster_id: Option<String> = conn
                     //     .query_row(
