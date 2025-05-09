@@ -6,7 +6,11 @@ use std::{
 };
 
 use petgraph::{
-    csr::DefaultIx, graph::NodeIndex, prelude::StableGraph, visit::{EdgeRef, IntoEdgeReferences}, Undirected,
+    csr::DefaultIx,
+    graph::NodeIndex,
+    prelude::StableGraph,
+    visit::{EdgeRef, IntoEdgeReferences},
+    Undirected,
 };
 use rancor::Strategy;
 use uuid::Uuid;
@@ -442,6 +446,7 @@ impl<A: Field<A> + Clone + Copy> InterPartitionGraph<A> {
 
         while let Some((current_weight, current_trail)) = search_queue.pop_front() {
             let (last_partition, _last_vector) = current_trail.last().unwrap().1;
+            // println!("Current trail ({last_partition:?}, {_last_vector:?})");
 
             if last_partition == to {
                 return Ok(Some((current_weight, current_trail)));
@@ -937,37 +942,46 @@ impl<A: Field<A> + Clone + Copy + Debug> IntraPartitionGraph<A> {
 
         Ok(result)
     }
-
 }
 
-
 pub trait UpdateTree<Strategy, A: Field<A> + Clone + Copy + Debug> {
-    fn update(&mut self, new_vector: VectorId, new_edges: &[(A, VectorId)]) -> Result<Vec<(A, VectorId, VectorId)>, ()>;
+    fn update(
+        &mut self,
+        new_vector: VectorId,
+        new_edges: &[(A, VectorId)],
+    ) -> Result<Vec<(A, VectorId, VectorId)>, ()>;
 }
 
 pub struct ReConstruct;
 
-impl<A: Field<A> + Clone + Copy + Debug + PartialOrd> UpdateTree<ReConstruct, A> for IntraPartitionGraph<A> {
-    fn update(&mut self, new_vector: VectorId, new_edges: &[(A, VectorId)]) -> Result<Vec<(A, VectorId, VectorId)>, ()> {
-        // 1. Extract current graph & node map
+impl<A: Field<A> + Clone + Copy + Debug + PartialOrd> UpdateTree<ReConstruct, A>
+    for IntraPartitionGraph<A>
+{
+    fn update(
+        &mut self,
+        new_vector: VectorId,
+        new_edges: &[(A, VectorId)],
+    ) -> Result<Vec<(A, VectorId, VectorId)>, ()> {
         let IntraPartitionGraph(ref mut graph, ref mut node_map, _) = self;
 
-        
-        // Collect old edges into a set
-        let old_edges: HashSet<(VectorId, VectorId)> = graph.edge_references()
+        let old_edges: HashSet<(VectorId, VectorId)> = graph
+            .edge_references()
             .map(|e| {
                 let a = *graph.node_weight(e.source()).unwrap();
                 let b = *graph.node_weight(e.target()).unwrap();
-                if a < b { (a, b) } else { (b, a) }
+                if a < b {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
             })
             .collect();
 
-        // Collect all vertices
         let mut all_vertices: Vec<VectorId> = graph.node_weights().cloned().collect();
         all_vertices.push(new_vector);
 
-        // Gather all candidate edges: old MST + new edges
-        let mut edges: Vec<(A, VectorId, VectorId)> = graph.edge_references()
+        let mut edges: Vec<(A, VectorId, VectorId)> = graph
+            .edge_references()
             .map(|e| {
                 let a = *graph.node_weight(e.source()).unwrap();
                 let b = *graph.node_weight(e.target()).unwrap();
@@ -979,10 +993,8 @@ impl<A: Field<A> + Clone + Copy + Debug + PartialOrd> UpdateTree<ReConstruct, A>
             edges.push((weight, new_vector, other));
         }
 
-        // Sort edges by weight
         edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
 
-        // Kruskal's DSU
         struct DSU {
             parent: HashMap<VectorId, VectorId>,
         }
@@ -1045,6 +1057,87 @@ impl<A: Field<A> + Clone + Copy + Debug + PartialOrd> UpdateTree<ReConstruct, A>
         Ok(new_edges_only)
     }
 }
+
+// {
+//     #[cfg(feature = "benchmark")]
+//     let _child_benchmark =
+//         Benchmark::spawn_child("Updating local graph".to_string(), &_child_benchmark);
+//
+//     let min_span_tree = resolve_buffer!(ACCESS, min_span_tree_buffer, closet_partition_id);
+//
+//     let Some(min_span_tree) = &mut *min_span_tree.write().await else {
+//         todo!()
+//     };
+//
+//     let vector_iter = min_span_tree.1.iter().map(|(x, _)| *x).collect::<Vec<_>>();
+//     let mut vector_iter = vector_iter.iter();
+//
+//     // first edge
+//     min_span_tree.add_node(VectorId(value.id));
+//
+//     min_span_tree.add_node(VectorId(value.id));
+//     match vector_iter.next() {
+//         Some(vector_id) => {
+//             min_span_tree.add_edge(
+//                 VectorId(value.id),
+//                 *vector_id,
+//                 *dist_map.get(vector_id).expect(""),
+//             );
+//         }
+//         None => todo!(),
+//     }
+//
+//     //  -> replace loop with while hashset.is_empty() & for loop for a trail
+//     // while iterating through trail (add and remove edges based on deleting or adding edges)
+//     //  This would reduce # of times trails are calculated
+//     //      Current O(vectors*(BFS)) = O(|V|*|V|*|E|))
+//     //                               = O(|V|*|V|^2)
+//     //                               = O(|V|^3)
+//     //      Proposed solution: O(|T|*(BFS)) = O(|T|*|V|*|E|))
+//     //                                      = O(|T|*|V|*|V|))
+//     //                                      = O(|T|*|V|^2))
+//     //      note: |T| := # of searched trails
+//     //      V(T1) U...U V(Tn) = V (The set of all searched vectors := vectors)
+//     //      |T| < |V|, therefore O(|T|*(BFS)) < O(vectors*(BFS))
+//     for vector_id in vector_iter {
+//         let weight = *dist_map.get(vector_id).expect("");
+//         event!(Level::DEBUG, "{:?} -> {:?}", vector_id, VectorId(value.id));
+//         let Ok(path) = min_span_tree.find_trail(*vector_id, VectorId(value.id)) else {
+//             event!(
+//                 Level::DEBUG,
+//                 "Failed to find trail:\n{min_span_tree:#?}\n{:?}\n{:?}",
+//                 vector_id,
+//                 VectorId(value.id)
+//             );
+//             todo!()
+//         };
+//         let Some((_, path)) = path else { todo!() };
+//
+//         let (max_vector_id_1, max_vector_id_2, max_weight) = path.into_iter().fold(
+//             (VectorId(Uuid::nil()), VectorId(Uuid::nil()), A::min()),
+//             |(acc_id_1, acc_id_2, acc_weight), (next_id_1, next_id_2, next_weight)| {
+//                 match next_weight.partial_cmp(&acc_weight) {
+//                     Some(Ordering::Greater) => (next_id_1, next_id_2, next_weight),
+//                     _ => (acc_id_1, acc_id_2, acc_weight),
+//                 }
+//             },
+//         );
+//
+//         if weight >= max_weight {
+//             continue;
+//         };
+//
+//         let _ = min_span_tree
+//             .remove_edge(max_vector_id_1, max_vector_id_2)
+//             .unwrap();
+//
+//         let _ = remove_cluster_edge(cluster_sets, max_vector_id_1, max_vector_id_2);
+//
+//         min_span_tree.add_edge(VectorId(value.id), *vector_id, weight);
+//
+//         update_cluster(cluster_sets, &weight, VectorId(value.id), *vector_id).await;
+//     }
+// }
 
 impl<'a, A: Field<A> + Debug> Into<Uuid> for &'a IntraPartitionGraph<A> {
     fn into(self) -> Uuid {

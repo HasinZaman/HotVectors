@@ -4,20 +4,21 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt::Display,
+    fs,
+    io::ErrorKind,
     marker::PhantomData,
     mem::{self, swap},
+    path::PathBuf,
+    str::FromStr,
     sync::Arc,
 };
 
 use heapify::{make_heap_with, pop_heap_with};
-use tokio::{
-    runtime::Runtime,
-    sync::RwLock,
-    task::{JoinHandle, JoinSet},
-};
+use tokio::sync::RwLock;
 use tracing::{event, Level};
 use uuid::Uuid;
 
+use crate::{db::component::ids::PartitionId, resolve_buffer};
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -128,9 +129,13 @@ impl Iterator for LeastUsedIterator {
     }
 }
 
+pub struct Global;
+pub struct Local;
+
 pub struct DataBuffer<
     A: Clone + Sized + Into<B>,
     B: Into<A> + FileExtension + Archive,
+    S,
     const CAP: usize,
 > where
     for<'a> &'a A: Into<Uuid>,
@@ -159,11 +164,11 @@ pub struct DataBuffer<
 
     pub index_map: RwLock<HashMap<Uuid, usize>>,
 
-    _phantom_data: PhantomData<B>,
+    _phantom_data: PhantomData<(B, S)>,
 }
 
-impl<A: Clone + Sized + Into<B>, B: Into<A> + FileExtension + Archive, const CAP: usize>
-    DataBuffer<A, B, CAP>
+impl<A: Clone + Sized + Into<B>, B: Into<A> + FileExtension + Archive, S, const CAP: usize>
+    DataBuffer<A, B, S, CAP>
 where
     for<'a> &'a A: Into<Uuid>,
     for<'a> <B as Archive>::Archived:
@@ -181,6 +186,13 @@ where
     >,
 {
     pub fn new(source: String) -> Self {
+        let path = PathBuf::from(&source);
+
+        if !path.exists() {
+            if let Err(e) = fs::create_dir_all(&path) {
+                panic!("Failed to create directory {}: {}", source, e);
+            }
+        }
         Self {
             source,
             buffer: array::from_fn(|_| Arc::new(RwLock::new(None))),
@@ -214,25 +226,25 @@ where
         }
     }
 
-    pub async fn save_pooling(&self, runtime: &Runtime) {
-        // let save_threads: Vec<JoinHandle<()>> = self.index_map
-        //     .read()
-        //     .await
-        //     .iter()
-        //     .map(|(_, index)| {
-        //         let index = *index;
-
-        //         let data = self.buffer[index].clone();
-        //         runtime.spawn(async move{
-
-        //             self.buffer[index]
-        //                 .read();
-        //         })
-        //     })
-        //     .collect();
-
-        todo!()
-    }
+    // pub async fn save_pooling(&self) {
+    //     let save_threads: Vec<JoinHandle<()>> = self.index_map
+    //         .read()
+    //         .await
+    //         .iter()
+    //         .map(|(_, index)| {
+    //             let index = *index;
+    //
+    //             let data = self.buffer[index].clone();
+    //             runtime.spawn(async move{
+    //
+    //                 self.buffer[index]
+    //                     .read();
+    //             })
+    //         })
+    //         .collect();
+    //
+    //     todo!()
+    // }
 
     // access data from buffer
     pub fn try_access(&mut self, id: &Uuid) -> Result<Arc<RwLock<Option<A>>>, BufferError> {
@@ -438,6 +450,35 @@ where
         Ok(())
     }
 
+    pub async fn delete_value(&mut self, id: &Uuid) -> Result<(), BufferError> {
+        if let Err(err) = self.remove(id).await {
+            println!("Attempted to drop {:?} from data buffer but {:?}", id, err);
+            if err != BufferError::DataNotFound {
+                return Err(err);
+            }
+        };
+
+        println!(
+            "delete: {}/{}.{}",
+            self.source,
+            id.to_string(),
+            B::extension()
+        );
+
+        match fs::remove_file(&format!(
+            "{}/{}.{}",
+            self.source,
+            id.to_string(),
+            B::extension()
+        )) {
+            Ok(_) => Ok(()),
+            Err(e) => match e.kind() {
+                ErrorKind::NotFound => Ok(()),
+                _ => todo!(),
+            },
+        }
+    }
+
     pub async fn unload(&mut self, id: &Uuid) -> Result<(), BufferError> {
         event!(Level::INFO, "unload :- id {}", id);
         // get access to all locks
@@ -556,6 +597,81 @@ where
         }
         Ok(())
     }
+
+    pub async fn try_unload_and_load(
+        &mut self,
+        unload_id: &Uuid,
+        load_id: &Uuid,
+    ) -> Result<(), BufferError> {
+        event!(Level::INFO, "Unloading and load");
+        let mut index_map = self.index_map.write().await;
+        event!(Level::DEBUG, "Acquired index_map");
+
+        let index = match index_map.get(unload_id) {
+            Some(index) => *index,
+            None => return Err(BufferError::DataNotFound),
+        };
+        event!(Level::DEBUG, "Acquired index");
+
+        let used_stack = &mut *self.used_stack[index].write().await;
+        event!(Level::DEBUG, "Acquired used_stack");
+
+        let Ok(mut buffer) = self.buffer[index].try_write() else {
+            return Err(BufferError::FailedLockAccess);
+        };
+        let buffer = &mut *buffer;
+        event!(Level::DEBUG, "Acquired buffer");
+
+        //load file
+        let load_value: A = {
+            let file_path = &format!(
+                "{}//{}.{}",
+                self.source,
+                load_id.to_string(),
+                B::extension()
+            );
+
+            event!(Level::DEBUG, "Load {file_path}");
+
+            let bytes = tokio::fs::read(file_path).await?;
+
+            from_bytes::<B, rancor::Error>(&bytes)?.into()
+        };
+        event!(Level::DEBUG, "Loaded file");
+
+        // drop data
+        *used_stack = Some((0, 1));
+        event!(Level::DEBUG, "Updated used_stack");
+
+        index_map.insert((&load_value).into(), index);
+        event!(Level::DEBUG, "Updated index_map");
+
+        let Some(unload_value) = mem::replace(buffer, Some(load_value)) else {
+            todo!()
+        };
+        event!(Level::DEBUG, "Swapped unload_value with load_value");
+
+        // removed id from index map
+        index_map.remove(unload_id);
+
+        // Export value
+        {
+            let path = &format!(
+                "{}//{}.{}",
+                self.source,
+                unload_id.to_string(),
+                B::extension()
+            );
+            event!(Level::INFO, "saving: {path}");
+            let serial_value: B = unload_value.into();
+
+            let bytes = to_bytes::<rancor::Error>(&serial_value)?;
+
+            tokio::fs::write(path, bytes.as_slice()).await?;
+        }
+        Ok(())
+    }
+
     pub async fn unload_and_push(
         &mut self,
         unload_id: &Uuid,
@@ -604,6 +720,137 @@ where
 
         Ok(())
     }
+
+    pub async fn try_unload_and_push(
+        &mut self,
+        unload_id: &Uuid,
+        push_value: A,
+    ) -> Result<(), BufferError> {
+        event!(Level::INFO, "Unloading and Pushing");
+        let mut index_map = self.index_map.write().await;
+        event!(Level::DEBUG, "Acquired index_map");
+
+        let index = match index_map.get(unload_id) {
+            Some(index) => *index,
+            None => return Err(BufferError::DataNotFound),
+        };
+        let used_stack = &mut *self.used_stack[index].write().await;
+        event!(Level::DEBUG, "Acquired used_stack");
+
+        let Ok(mut buffer) = self.buffer[index].try_write() else {
+            return Err(BufferError::FailedLockAccess);
+        };
+        let buffer = &mut *buffer;
+        event!(Level::DEBUG, "Acquired buffer");
+
+        // drop data
+        *used_stack = Some((0, 1));
+
+        index_map.insert((&push_value).into(), index);
+
+        let Some(unload_value) = mem::replace(buffer, Some(push_value)) else {
+            todo!()
+        };
+
+        // removed id from index map
+        index_map.remove(unload_id);
+
+        // Export value
+        let path = &format!(
+            "{}//{}.{}",
+            self.source,
+            unload_id.to_string(),
+            B::extension()
+        );
+        event!(Level::INFO, "saving: {path}");
+
+        let serial_value: B = unload_value.into();
+
+        let bytes = to_bytes::<rancor::Error>(&serial_value)?;
+
+        tokio::fs::write(path, bytes.as_slice()).await?;
+
+        Ok(())
+    }
+}
+
+pub async fn flush<
+    A: Clone + Sized + Into<B>,
+    B: Into<A> + FileExtension + Archive,
+    const CAP_1: usize,
+    const CAP_2: usize,
+>(
+    mut source_buffer: DataBuffer<A, B, Local, CAP_1>,
+    sink_buffer: &mut DataBuffer<A, B, Global, CAP_2>,
+) -> Result<(), BufferError>
+where
+    for<'a> &'a A: Into<Uuid>,
+    for<'a> <B as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    <B as Archive>::Archived: Deserialize<B, Strategy<Pool, rancor::Error>>,
+    B: for<'a> rkyv::Serialize<
+        rancor::Strategy<
+            rkyv::ser::Serializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::ser::sharing::Share,
+            >,
+            rancor::Error,
+        >,
+    >,
+{
+    for (id, idx) in &*source_buffer.index_map.read().await {
+        let Some(data) = &*source_buffer.buffer[*idx].read().await else {
+            todo!();
+        };
+
+        println!("Trying to push {id:?}");
+        match sink_buffer.try_access(id) {
+            Ok(val) => {
+                let Some(val) = &mut *val.write().await else {
+                    todo!()
+                };
+
+                *val = data.clone();
+            }
+            Err(BufferError::DataNotFound) => {
+                resolve_buffer!(PUSH, sink_buffer, data.clone());
+            }
+            Err(_) => todo!(),
+        }
+    }
+
+    for path in fs::read_dir(&source_buffer.source).unwrap() {
+        // Construct paths
+        let id =
+            Uuid::from_str(path.unwrap().path().file_stem().unwrap().to_str().unwrap()).unwrap();
+
+        let data = resolve_buffer!(ACCESS, source_buffer, PartitionId(id));
+        let Some(data) = &mut *data.write().await else {
+            todo!()
+        };
+        match sink_buffer.try_access(&id) {
+            Ok(val) => {
+                let Some(val) = &mut *val.write().await else {
+                    todo!()
+                };
+                *val = data.clone();
+            }
+            Err(BufferError::DataNotFound) => {
+                resolve_buffer!(PUSH, sink_buffer, data.clone());
+                // let source_path = format!("{}/{}.{}", source_buffer.source, id.to_string(), B::extension());
+                // let sink_path = format!("{}/{}.{}", sink_buffer.source, id.to_string(), B::extension());
+
+                // Move file from source directory to sink directory
+                // tokio::fs::rename(&source_path, &sink_path).await.unwrap();
+            }
+            Err(_) => todo!(),
+        }
+    }
+
+    fs::remove_dir_all(source_buffer.source).unwrap();
+
+    Ok(())
 }
 
 #[macro_export]
@@ -621,10 +868,20 @@ macro_rules! resolve_buffer {
                 Ok(value) => value,
                 Err(_) => {
                     if let Ok(_) = $buffer.load(&$id).await {
-                        break 'buffer_access $buffer.access(&$id).await.unwrap();
+                        match $buffer.try_access(&$id) {
+                            Ok(val) => break 'buffer_access val,
+                            Err(_) => {}
+                        };
                     };
 
-                    let mut least_used = $buffer.least_used_iter().await.unwrap();
+                    let mut least_used = loop {
+                        match $buffer.least_used_iter().await {
+                            Some(val) => break val,
+                            None => {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    };
 
                     loop {
                         event!(Level::DEBUG, "Attempt get least used");
@@ -634,6 +891,7 @@ macro_rules! resolve_buffer {
                                 Some(val) => val,
                                 None => continue,
                             };
+                            tokio::task::yield_now().await;
                             continue;
                         };
 
@@ -642,6 +900,7 @@ macro_rules! resolve_buffer {
                             "Filtering values any value that is equal to load goal"
                         );
                         if $id == PartitionId(next_unload.1) {
+                            tokio::task::yield_now().await;
                             continue;
                         }
 
@@ -651,8 +910,10 @@ macro_rules! resolve_buffer {
                             next_unload.1,
                             $id
                         );
-                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                        if let Err(err) = $buffer.try_unload_and_load(&next_unload.1, &$id).await {
+                            println!("Err({err:?})");
                             event!(Level::DEBUG, "Err({err:?})");
+                            tokio::task::yield_now().await;
                             continue;
                         };
 
@@ -660,6 +921,8 @@ macro_rules! resolve_buffer {
                             event!(Level::DEBUG, "Break loop and return");
                             break value;
                         }
+
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -675,14 +938,25 @@ macro_rules! resolve_buffer {
                 stringify!($buffer),
                 $loaded_ids
             );
-            match $buffer.access(&$id).await {
+            match $buffer.try_access(&$id) {
                 Ok(partition) => partition,
                 Err(_) => {
                     if let Ok(_) = $buffer.load(&$id).await {
-                        break 'buffer_access $buffer.access(&$id).await.unwrap();
+                        match $buffer.try_access(&$id) {
+                            Ok(val) => break 'buffer_access val,
+                            Err(_) => {}
+                        }
+                        // $buffer.access(&$id).await.unwrap();
                     };
 
-                    let mut least_used = $buffer.least_used_iter().await.unwrap();
+                    let mut least_used = loop {
+                        match $buffer.least_used_iter().await {
+                            Some(val) => break val,
+                            None => {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    };
 
                     loop {
                         event!(Level::DEBUG, "Attempt get least used");
@@ -718,13 +992,14 @@ macro_rules! resolve_buffer {
                             next_unload.1,
                             $id
                         );
-                        if let Err(err) = $buffer.unload_and_load(&next_unload.1, &$id).await {
+                        if let Err(err) = $buffer.try_unload_and_load(&next_unload.1, &$id).await {
                             event!(Level::DEBUG, "Err({err:?})");
+                            tokio::task::yield_now().await;
                             continue;
                         };
 
                         event!(Level::DEBUG, "Break loop and return");
-                        break $buffer.access(&$id).await.unwrap();
+                        break $buffer.try_access(&$id).unwrap();
                     }
                 }
             }
@@ -761,10 +1036,11 @@ macro_rules! resolve_buffer {
 
                 event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
                 if let Err(err) = $buffer
-                    .unload_and_push(&next_unload.1, $value.clone())
+                    .try_unload_and_push(&next_unload.1, $value.clone())
                     .await
                 {
                     event!(Level::DEBUG, "Err({err:?})");
+                    tokio::task::yield_now().await;
                     continue;
                 };
 
@@ -809,10 +1085,11 @@ macro_rules! resolve_buffer {
 
                 event!(Level::DEBUG, "Attempt to unload({:?})", next_unload.1);
                 if let Err(err) = $buffer
-                    .unload_and_push(&next_unload.1, $value.clone())
+                    .try_unload_and_push(&next_unload.1, $value.clone())
                     .await
                 {
                     event!(Level::DEBUG, "Err({err:?})");
+                    tokio::task::yield_now().await;
                     continue;
                 };
 

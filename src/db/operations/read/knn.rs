@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     db::{
         component::{
-            data_buffer::{BufferError, DataBuffer},
+            data_buffer::{BufferError, DataBuffer, Global},
             graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
             ids::{PartitionId, VectorId},
             meta::Meta,
@@ -109,7 +109,12 @@ pub async fn approximate_knn<
 
     partition_buffer: Arc<
         RwLock<
-            DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
+            DataBuffer<
+                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                PartitionSerial<A>,
+                Global,
+                MAX_LOADED,
+            >,
         >,
     >,
 
@@ -166,7 +171,12 @@ pub async fn stream_exact_knn<
 
     partition_buffer: Arc<
         RwLock<
-            DataBuffer<Partition<A, B, PARTITION_CAP, VECTOR_CAP>, PartitionSerial<A>, MAX_LOADED>,
+            DataBuffer<
+                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+                PartitionSerial<A>,
+                Global,
+                MAX_LOADED,
+            >,
         >,
     >,
 

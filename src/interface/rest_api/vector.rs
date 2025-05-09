@@ -122,13 +122,18 @@ where
 }
 
 // vector insertions
+#[derive(Serialize, Deserialize)]
+pub struct InsertPayload {
+    vector_id: String,
+}
+
 pub(super) async fn insert<
     A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + 'static,
     B: VectorSpace<A> + Sized + Send + Sync + 'static + TryFrom<Vec<f32>>,
 >(
     State(state): State<Arc<HotRequest<A, B>>>,
     Json(payload): Json<VectorData<f32>>,
-) -> Json<String>
+) -> Json<InsertPayload>
 where
     <B as TryFrom<Vec<f32>>>::Error: Debug,
 {
@@ -150,8 +155,19 @@ where
         ))
         .await;
 
+    let inserted_id = match rx.recv().await {
+        Some(Response::Success(Success::Vector(id, _))) => id,
+        None => {
+            todo!()
+        }
+        _ => {
+            todo!()
+        }
+    };
     match rx.recv().await {
-        Some(Response::Done) => Json("Vector received".to_string()),
+        Some(Response::Done) => Json(InsertPayload {
+            vector_id: inserted_id.0.to_string(),
+        }),
         None => {
             todo!()
         }
@@ -161,21 +177,26 @@ where
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct BatchInsertPayload {
+    vector_ids: Vec<String>,
+}
 pub(super) async fn batch_insert<
     A: Field<A> + Clone + Copy + Sized + Send + Sync + Debug + 'static,
     B: VectorSpace<A> + Sized + Send + Sync + 'static + TryFrom<Vec<f32>>,
 >(
     State(state): State<Arc<HotRequest<A, B>>>,
     Json(payload): Json<Vec<VectorData<f32>>>,
-) -> Json<String>
+) -> Json<BatchInsertPayload>
 where
     <B as TryFrom<Vec<f32>>>::Error: Debug,
 {
-    let (tx, mut rx) = channel(2);
-
+    let mut data_recvs = Vec::with_capacity(payload.len());
     let mut results = Vec::with_capacity(payload.len());
     println!("INSERT BATCH VECTOR");
     for vector in payload {
+        let (tx, mut rx) = channel(2);
+
         let vector = vector.vector;
         println!("{:?}", vector);
 
@@ -189,16 +210,39 @@ where
                 tx.clone(),
             ))
             .await;
-
-        results.push(rx.recv().await);
+        //
+        data_recvs.push(rx);
+        // let inserted_id = match rx.recv().await {
+        //     Some(Response::Success(Success::Vector(id, _))) => id,
+        //     None => {
+        //         todo!()
+        //     }
+        //     bad => {
+        //         println!("{bad:?}");
+        //         todo!()
+        //     }
+        // };
+        // rx.recv().await;
+        // results.push(inserted_id.0.to_string());
+    }
+    for mut rx in data_recvs {
+        let inserted_id = match rx.recv().await {
+            Some(Response::Success(Success::Vector(id, _))) => id,
+            None => {
+                todo!()
+            }
+            bad => {
+                println!("{bad:?}");
+                todo!()
+            }
+        };
+        rx.recv().await;
+        results.push(inserted_id.0.to_string());
     }
 
-    match results.iter().all(|x| x.is_some()) {
-        true => Json("Vector received".to_string()),
-        false => {
-            todo!()
-        }
-    }
+    return Json(BatchInsertPayload {
+        vector_ids: results,
+    });
 }
 
 pub(super) struct VectorRoutes;

@@ -22,11 +22,7 @@ use crate::{
     db::component::{
 <<<<<<< Updated upstream
         cluster::ClusterSet,
-        data_buffer::DataBuffer,
-=======
-        cluster::{self, ClusterSet},
         data_buffer::{DataBuffer, Global},
->>>>>>> Stashed changes
         graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
         ids::{PartitionId, VectorId},
         meta::Meta,
@@ -60,7 +56,9 @@ pub async fn build_clusters<
     cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>>, // maybe replace with a databuffer in the future??
 
     inter_graph: Arc<RwLock<InterPartitionGraph<A>>>,
-    intra_graph_buffer: Arc<RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, CAP>>>,
+    intra_graph_buffer: Arc<
+        RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, Global, CAP>>,
+    >,
 ) where
     <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
     for<'a> <A as Archive>::Archived:

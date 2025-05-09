@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, str::FromStr};
+use std::str::FromStr;
 
 use rancor::Strategy;
 use rkyv::{
@@ -111,7 +111,7 @@ impl<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Clone + From<VectorSerial<A
             let path = entry.path();
             if let Some(extension) = path.extension() {
                 if extension == MetaSerial::<A>::extension() {
-                    let file_name = path.file_stem().unwrap().to_string_lossy();
+                    // let file_name = path.file_stem().unwrap().to_string_lossy();
                     let bytes = tokio::fs::read(&path).await.unwrap();
                     let meta_serial: MetaSerial<A> =
                         from_bytes::<MetaSerial<A>, rancor::Error>(&bytes).unwrap();
