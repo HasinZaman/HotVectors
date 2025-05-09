@@ -14,11 +14,7 @@ use std::{
 };
 
 use heapify::{make_heap_with, pop_heap_with};
-use tokio::{
-    runtime::Runtime,
-    sync::RwLock,
-    task::{JoinHandle, JoinSet},
-};
+use tokio::sync::RwLock;
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -462,7 +458,8 @@ where
             }
         };
 
-        println!("delete: {}/{}.{}",
+        println!(
+            "delete: {}/{}.{}",
             self.source,
             id.to_string(),
             B::extension()

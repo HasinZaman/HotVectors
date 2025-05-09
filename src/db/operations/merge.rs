@@ -112,8 +112,11 @@ pub fn merge_partition_into<
         delete_edges.push(*weight);
     }
 
-    for (weight, (source_partition_id, source_vector_id), (target_partition_id, target_vector_id)) in
-        delete_edges
+    for (
+        weight,
+        (source_partition_id, source_vector_id),
+        (target_partition_id, target_vector_id),
+    ) in delete_edges
     {
         let _ = inter_graph
             .remove_edge(
