@@ -1,18 +1,18 @@
-
-
 use std::ops::Deref;
-use std::sync::mpsc::{Receiver, Sender, RecvTimeoutError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_sqlite::rusqlite::{self, Connection};
+use tokio::fs;
 use tokio::time::sleep;
 use uuid::Uuid;
 
 #[derive(Clone, Copy)]
-pub enum BenchmarkId{
+pub enum BenchmarkId {
     ID(Uuid),
-    Child(Uuid , Uuid)
+    Child(Uuid, Uuid),
 }
 
 impl Deref for BenchmarkId {
@@ -27,12 +27,12 @@ impl Deref for BenchmarkId {
 }
 
 #[derive(Clone)]
-pub struct Benchmark{
+pub struct Benchmark {
     id: BenchmarkId,
     start: u64,
     pub message: String,
 
-    sender: Arc<Sender<(BenchmarkId, u64, u64, String)>>
+    sender: Arc<Sender<(BenchmarkId, u64, u64, String)>>,
 }
 
 impl Benchmark {
@@ -45,7 +45,7 @@ impl Benchmark {
         }
     }
 
-    pub fn spawn_child(message: String, parent: &Self,) -> Self {
+    pub fn spawn_child(message: String, parent: &Self) -> Self {
         Self {
             id: BenchmarkId::Child(*parent.id, Uuid::new_v4()),
             start: get_timestamp(),
@@ -55,27 +55,33 @@ impl Benchmark {
     }
 }
 
-impl Drop for Benchmark{
+impl Drop for Benchmark {
     fn drop(&mut self) {
-        let _ = self.sender.send((
-            self.id,
-            self.start,
-            get_timestamp(),
-            self.message.clone()
-        ));
+        let _ = self
+            .sender
+            .send((self.id, self.start, get_timestamp(), self.message.clone()));
     }
 }
 
 fn get_timestamp() -> u64 {
     let now = SystemTime::now();
-    let since_epoch = now.duration_since(UNIX_EPOCH)
-        .expect("Time went backwards");
+    let since_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
 
     since_epoch.as_secs() as u64
 }
 
 pub async fn benchmark_logger(receiver: Receiver<(BenchmarkId, u64, u64, String)>) -> ! {
-    let conn = match Connection::open("benchmark_logs.db") {
+    let dir_path = Path::new("benchmarks");
+    if let Err(e) = fs::create_dir_all(&dir_path).await {
+        panic!("Failed to create benchmark directory: {}", e);
+    }
+
+    let timestamp = get_timestamp();
+
+    // Build the DB filename with the timestamp
+    let db_path = format!("benchmarks/benchmark_logs_{}.db", timestamp);
+
+    let conn = match Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
             panic!("Failed to open SQLite DB: {}", e);
@@ -114,7 +120,7 @@ pub async fn benchmark_logger(receiver: Receiver<(BenchmarkId, u64, u64, String)
             eprintln!("Failed to begin transaction: {}", e);
             continue;
         } else {
-            println!("Begin Transaction");
+            // println!("Begin Transaction");
         }
 
         // Process the first message
@@ -136,17 +142,14 @@ pub async fn benchmark_logger(receiver: Receiver<(BenchmarkId, u64, u64, String)
         }
 
         if let Err(e) = conn.execute("COMMIT", []) {
-            eprintln!("Failed to commit transaction: {}", e);
+            // eprintln!("Failed to commit transaction: {}", e);
         }
 
         sleep(timeout).await;
     }
 }
 
-fn process_benchmark_message(
-    conn: &rusqlite::Connection,
-    msg: (BenchmarkId, u64, u64, String),
-) {
+fn process_benchmark_message(conn: &rusqlite::Connection, msg: (BenchmarkId, u64, u64, String)) {
     match msg {
         (BenchmarkId::ID(id), start, end, message) => {
             if let Err(e) = conn.execute(
@@ -155,17 +158,23 @@ fn process_benchmark_message(
             ) {
                 eprintln!("Failed to insert benchmark: {}", e);
             } else {
-                println!("Benchmark recorded: {}", id);
+                // println!("Benchmark recorded: {}", id);
             }
         }
         (BenchmarkId::Child(parent_id, child_id), start, end, message) => {
             if let Err(e) = conn.execute(
                 "INSERT INTO benchmark (id, parent_id, start, end, message) VALUES (?, ?, ?, ?, ?)",
-                (child_id.to_string(), parent_id.to_string(), start, end, message),
+                (
+                    child_id.to_string(),
+                    parent_id.to_string(),
+                    start,
+                    end,
+                    message,
+                ),
             ) {
                 eprintln!("Failed to insert benchmark: {}", e);
             } else {
-                println!("Benchmark recorded: {}", child_id);
+                // println!("Benchmark recorded: {}", child_id);
             }
         }
     }
