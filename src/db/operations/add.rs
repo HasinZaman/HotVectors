@@ -34,7 +34,7 @@ use crate::{
             cluster::ClusterSet,
             data_buffer::{flush, BufferError, DataBuffer, Global, Local},
             graph::{GraphSerial, IntraPartitionGraph, ReConstruct, UpdateTree},
-            ids::{PartitionId, VectorId},
+            ids::{ClusterId, PartitionId, VectorId},
             meta::Meta,
             partition::{
                 ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
@@ -42,7 +42,7 @@ use crate::{
             },
         },
         operations::{
-            cluster::{remove_cluster_edge, update_cluster},
+            cluster::{self, remove_cluster_edge, update_cluster},
             merge::{merge_partition_into, MergeError},
             split::{
                 calculate_number_of_trees, split_partition, split_partition_into_trees,
@@ -216,6 +216,8 @@ where
         let inter_graph = &*inter_graph.read().await;
         event!(Level::DEBUG, "🔒 Locked `inter_graph`");
 
+        let cluster_sets = &mut *cluster_sets.write().await;
+
         // find closet id
         let (mut closet_partition_id, closet_size) = {
             #[cfg(feature = "benchmark")]
@@ -290,17 +292,23 @@ where
             meta.size = partition.size;
             meta.centroid = partition.centroid();
 
-            // meta.edge_length = (todo!(), todo!());
-
-            // update cluster set data
             // for cluster_set in cluster_sets.iter_mut() {
-            //     event!(Level::DEBUG, "cluster_set({:?})", cluster_set.threshold);
-            //     let cluster_id = cluster_set.new_cluster().await.unwrap();
             //     let _ = cluster_set
-            //         .new_cluster_from_vector(VectorId(value.id), cluster_id)
+            //         .new_cluster_from_vector(VectorId(new_vector.id), ClusterId(Uuid::new_v4()))
             //         .await
             //         .unwrap();
             // }
+
+            // meta.edge_length = (todo!(), todo!());
+
+            // update cluster set data
+            for cluster_set in cluster_sets.iter_mut() {
+                let cluster_id = cluster_set.new_cluster().await.unwrap();
+                let _ = cluster_set
+                    .new_cluster_from_vector(VectorId(new_vector.id), cluster_id)
+                    .await
+                    .unwrap();
+            }
 
             return Ok(());
         }
@@ -509,11 +517,10 @@ where
             }
         };
     };
-    
+
     #[cfg(feature = "benchmark")]
     let _child_benchmark = Benchmark::spawn_child("Total Insertion time".to_string(), &benchmark);
 
-    
     let read_partitions: HashSet<_> = acquired_partitions
         .difference(&write_partitions)
         .map(|x| *x)
@@ -526,6 +533,7 @@ where
         mut local_inter_graph,
         mut local_partition_buffer,
         mut local_mst_buffer,
+        // mut local_cluster_sets,
     ) = {
         let local_meta_data = {
             let mut local_meta_data = HashMap::new();
@@ -581,7 +589,7 @@ where
             local_inter_graph
         };
 
-        let local_partition_buffer: DataBuffer<
+        let mut local_partition_buffer: DataBuffer<
             Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
             PartitionSerial<A>,
             Local,
@@ -631,11 +639,41 @@ where
             local_mst_buffer
         };
 
+        // let local_cluster_sets = 'cluster_sets: {
+        //     let cluster_sets = &*cluster_sets.read().await;
+
+        //     if cluster_sets.len() == 0 {
+        //         break 'cluster_sets Vec::new();
+        //     }
+
+        //     // could be optimized through incremental loading & updating
+        //     // so vectors can be loaded while the database is being initialized(pipelined)
+        //     // therefore something is being done while files are being loaded or db is updated & less memory in vector_ids
+        //     let mut vector_ids = Vec::new();
+        //     for id in &write_partitions {
+        //         let partition = resolve_buffer!(ACCESS, local_partition_buffer, *id);
+        //         let Some(partition) = &*partition.read().await else {
+        //             todo!();
+        //         };
+
+        //         for VectorEntry{id, ..} in partition.iter() {
+        //             vector_ids.push(VectorId(id.clone()));
+        //         }
+        //     }
+
+        //     cluster::create_local(
+        //         cluster_sets,
+        //         vector_ids.as_slice(),
+        //         transaction_id.clone()
+        //     ).await
+        // };
+
         (
             local_meta_data,
             local_inter_graph,
             local_partition_buffer,
             local_mst_buffer,
+            // local_cluster_sets
         )
     };
 
@@ -789,12 +827,18 @@ where
 
     // update min_spanning
     println!("{:?} :- Update MST", new_vector.id);
-    'update_min_span: {
+    let (new_edges, deleted_edges): (
+        HashMap<(VectorId, VectorId), A>,
+        HashSet<(VectorId, VectorId)>,
+    ) = 'update_min_span: {
         #[cfg(feature = "benchmark")]
         let _child_benchmark =
             Benchmark::spawn_child("Update min-spanning tree".to_string(), &benchmark);
         // filter out partitions where there is no overlap partition_max < vector_min
         // let mut neighbor_ids = HashSet::new();
+
+        let mut new_edges: HashMap<(VectorId, VectorId), A> = HashMap::new();
+        let mut deleted_edges: HashSet<(VectorId, VectorId)> = HashSet::new();
 
         // can be done in step 1 & update during partition splits during insertions
         // approx umap might not return the same results
@@ -972,7 +1016,7 @@ where
 
             min_span_tree.add_node(VectorId(new_vector.id));
 
-            break 'update_min_span;
+            break 'update_min_span (new_edges, deleted_edges);
         }
 
         // Update closest partition edges
@@ -1004,7 +1048,7 @@ where
                 None => todo!(),
             }
 
-            let _new_edges = min_span_tree.update(
+            let Ok(tmp_new_edges) = min_span_tree.update(
                 VectorId(new_vector.id),
                 &dist_map
                     .iter()
@@ -1012,7 +1056,16 @@ where
                     .filter(|(id, _)| min_span_tree.1.contains_key(&VectorId(**id)))
                     .map(|(id, dist)| (*dist, VectorId(*id)))
                     .collect::<Vec<_>>(),
-            );
+            ) else {
+                todo!()
+            };
+
+            for (weight, source, target) in tmp_new_edges {
+                new_edges.insert((source, target), weight);
+
+                // update_cluster(&mut local_cluster_sets, &weight, source, target)
+                //     .await;
+            }
 
             //  -> replace loop with while hashset.is_empty() & for loop for a trail
             // while iterating through trail (add and remove edges based on deleting or adding edges)
@@ -1067,7 +1120,7 @@ where
 
             //     min_span_tree.add_edge(VectorId(new_vector.id), *vector_id, weight);
 
-            //     // update_cluster(cluster_sets, &weight, VectorId(value.id), *vector_id).await;
+            // update_cluster(local_cluster_sets, &weight, VectorId(value.id), *vector_id).await;
             // }
         }
 
@@ -1456,38 +1509,39 @@ where
                     if weight >= &max_weight {
                         continue;
                     };
-
-                    if cached_partitions.contains_key(&partition_id_1) {
-                        for (partition_id, vector_1, vector_2) in
-                            cached_partitions.remove(&partition_id_1).unwrap()
-                        {
-                            partition_path_cache.remove(&(partition_id, vector_1, vector_2));
-                            partition_path_cache.remove(&(partition_id, vector_2, vector_1));
+                    // update cached data
+                    {
+                        if cached_partitions.contains_key(&partition_id_1) {
+                            for (partition_id, vector_1, vector_2) in
+                                cached_partitions.remove(&partition_id_1).unwrap()
+                            {
+                                partition_path_cache.remove(&(partition_id, vector_1, vector_2));
+                                partition_path_cache.remove(&(partition_id, vector_2, vector_1));
+                            }
                         }
+                        if cached_partitions.contains_key(&partition_id_2) {
+                            for (partition_id, vector_1, vector_2) in
+                                cached_partitions.remove(&partition_id_2).unwrap()
+                            {
+                                partition_path_cache.remove(&(partition_id, vector_1, vector_2));
+                                partition_path_cache.remove(&(partition_id, vector_2, vector_1));
+                            }
+                        }
+
+                        if cached_partition_hints.contains_key(&partition_id_1) {
+                            for id in cached_partition_hints.remove(&partition_id_1).unwrap() {
+                                cached_partition_hints.remove(&partition_id_1);
+                                hints_cache.remove(&id);
+                            }
+                        };
+
+                        if cached_partition_hints.contains_key(&partition_id_2) {
+                            for id in cached_partition_hints.remove(&partition_id_2).unwrap() {
+                                cached_partition_hints.remove(&partition_id_2);
+                                hints_cache.remove(&id);
+                            }
+                        };
                     }
-                    if cached_partitions.contains_key(&partition_id_2) {
-                        for (partition_id, vector_1, vector_2) in
-                            cached_partitions.remove(&partition_id_2).unwrap()
-                        {
-                            partition_path_cache.remove(&(partition_id, vector_1, vector_2));
-                            partition_path_cache.remove(&(partition_id, vector_2, vector_1));
-                        }
-                    }
-
-                    if cached_partition_hints.contains_key(&partition_id_1) {
-                        for id in cached_partition_hints.remove(&partition_id_1).unwrap() {
-                            cached_partition_hints.remove(&partition_id_1);
-                            hints_cache.remove(&id);
-                        }
-                    };
-
-                    if cached_partition_hints.contains_key(&partition_id_2) {
-                        for id in cached_partition_hints.remove(&partition_id_2).unwrap() {
-                            cached_partition_hints.remove(&partition_id_2);
-                            hints_cache.remove(&id);
-                        }
-                    };
-
                     local_inter_graph.add_edge(
                         closet_partition_id,
                         target_partition_id,
@@ -1498,7 +1552,28 @@ where
                         ),
                     );
 
-                    // update_cluster(cluster_sets, &weight, VectorId(new_vector.id), target_vector_id)
+                    if new_edges.contains_key(&(vector_id_1, vector_id_2))
+                        || new_edges.contains_key(&(vector_id_2, vector_id_1))
+                    {
+                        new_edges.remove(&(vector_id_1, vector_id_2));
+                        new_edges.remove(&(vector_id_2, vector_id_1));
+                    }
+                    if !deleted_edges.contains(&(vector_id_2, vector_id_1)) {
+                        deleted_edges.insert((vector_id_1, vector_id_2));
+                    }
+
+                    if deleted_edges.contains(&(VectorId(new_vector.id), target_vector_id))
+                        || deleted_edges.contains(&(target_vector_id, VectorId(new_vector.id)))
+                    {
+                        deleted_edges.remove(&(VectorId(new_vector.id), target_vector_id));
+                        deleted_edges.remove(&(target_vector_id, VectorId(new_vector.id)));
+                    }
+
+                    if !new_edges.contains_key(&(target_vector_id, VectorId(new_vector.id))) {
+                        new_edges.insert((VectorId(new_vector.id), target_vector_id), *weight);
+                    }
+
+                    // update_cluster(&mut local_cluster_sets, &weight, VectorId(new_vector.id), target_vector_id)
                     //     .await;
 
                     match partition_id_1 == partition_id_2 {
@@ -1669,7 +1744,9 @@ where
                 visit_requirements.take(&target_partition_id);
             }
         }
-    }
+
+        (new_edges, deleted_edges)
+    };
 
     // merge splits
     {
@@ -1764,7 +1841,7 @@ where
                             }
                             _ => {
                                 todo!()
-                            },
+                            }
                         }
                     }
                 }
@@ -1774,7 +1851,7 @@ where
             }
         }
     }
-    
+
     // update global using local data
     println!("{:?} :- Update global", new_vector.id);
     {
@@ -1799,6 +1876,7 @@ where
             // update meta_data & inter_graph together
             let meta_data = &mut *meta_data.write().await;
             let inter_graph = &mut *inter_graph.write().await;
+            let cluster_sets = &mut *cluster_sets.write().await;
             {
                 for (id, local_data) in local_meta_data {
                     match meta_data.contains_key(&id) {
@@ -1874,9 +1952,25 @@ where
                 // println!("final global: {inter_graph:#?}");
             }
 
-            let _ =
-                fs::remove_dir_all(&format!("data/local/{}", transaction_id.to_string())).unwrap();
+            {
+                for cluster_set in cluster_sets.iter_mut() {
+                    let cluster_id = cluster_set.new_cluster().await.unwrap();
+                    let _ = cluster_set
+                        .new_cluster_from_vector(VectorId(new_vector.id), cluster_id)
+                        .await
+                        .unwrap();
+                }
+                
+                for ((id_1, id_2), dist) in new_edges {
+                    update_cluster(cluster_sets, &dist, id_1, id_2).await;
+                }
+
+                for (id_1, id_2) in deleted_edges {
+                    remove_cluster_edge(cluster_sets, id_1, id_2).await;
+                }
+            }
         }
+        let _ = fs::remove_dir_all(&format!("data/local/{}", transaction_id.to_string())).unwrap();
     }
 
     println!("{:?} :- Release acquired_partitions", new_vector.id);
