@@ -21,7 +21,7 @@ use crate::{
     vector::{Extremes, Field, VectorSerial, VectorSpace},
 };
 
-use super::merge::merge_partition_into;
+use super::merge::{merge_partition_into, MergeError};
 
 pub struct PartitionSubSet<
     'a,
@@ -618,10 +618,9 @@ impl<
             };
 
             for vec_id in current_tree_nodes {
-                println!("Looking for vector ID in partition: {:?}", vec_id);
+                // println!("Looking for vector ID in partition: {:?}", vec_id);
                 match partition.iter().position(|v| v.id == **vec_id) {
                     Some(index) => {
-                        println!("Found at index {}", index);
                         target_subset.add(index).unwrap();
                     }
                     None => {
@@ -979,20 +978,26 @@ pub fn split_partition_into_trees<
 
             for source in neighbors {
                 let _ = id_queue.take(&source.0);
-                let source = pairs.remove(&source.0).unwrap();
+                let (source_partition, source_mst) = pairs.remove(&source.0).unwrap();
                 let (sink_partition, sink_mst) = &pairs[&initial_id];
 
-                // should work :- the union of subsets should never be greater than initial set -> no overflow
-                // :- we already checked if the partitions are connected
-                pairs.insert(
-                    initial_id,
-                    merge_partition_into(
-                        (sink_partition, sink_mst),
-                        (&source.0, &source.1),
-                        inter_graph,
-                    )
-                    .unwrap(),
+                let result = merge_partition_into(
+                    (sink_partition, sink_mst),
+                    (&source_partition, &source_mst),
+                    inter_graph,
                 );
+
+                match result {
+                    Ok(val) => {
+                        pairs.insert(initial_id, val);
+                    }
+                    Err(MergeError::Overflow) => {
+                        id_queue.insert(source.0);
+                        pairs.insert(source.0, (source_partition, source_mst));
+                        break;
+                    }
+                    _ => todo!(),
+                }
             }
         }
     }
@@ -1025,15 +1030,25 @@ pub fn split_partition_into_trees<
                     let (source_partition, source_mst) = pairs.remove(&source.0).unwrap();
                     let (sink_partition, sink_mst) = &pairs[&initial_id];
 
-                    pairs.insert(
-                        initial_id,
-                        merge_partition_into(
-                            (sink_partition, sink_mst),
-                            (&source_partition, &source_mst),
-                            inter_graph,
-                        )
-                        .unwrap(),
+                    // should work :- the union of subsets should never be greater than initial set -> no overflow
+                    // :- we already checked if the partitions are connected
+                    let result = merge_partition_into(
+                        (sink_partition, sink_mst),
+                        (&source_partition, &source_mst),
+                        inter_graph,
                     );
+
+                    match result {
+                        Ok(val) => {
+                            pairs.insert(id, val);
+                        }
+                        Err(MergeError::Overflow) => {
+                            id_queue.insert(source.0);
+                            pairs.insert(source.0, (source_partition, source_mst));
+                            break;
+                        }
+                        _ => todo!(),
+                    }
                 }
             }
         }
