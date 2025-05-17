@@ -27,7 +27,7 @@ use component::{
 };
 use log::State;
 use operations::{
-    add::add,
+    add::{batch, single},
     cluster::build_clusters,
     read::{
         knn::stream_exact_knn, stream_inter_graph, stream_meta_data, stream_partition_graph,
@@ -72,6 +72,10 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
     // Write
     InsertVector {
         vector: B,
+        transaction_id: Option<Uuid>,
+    },
+    BatchInsertVectors {
+        vectors: Vec<B>,
         transaction_id: Option<Uuid>,
     },
     DeleteVector {
@@ -557,9 +561,9 @@ where
                             rt.spawn(async move {
                                 let value = VectorEntry::from_uuid(vector, id);
 
-                                match add(
+                                match single::add(
                                     value,
-                                    None,
+                                    transaction_id,
                                     meta_data,
                                     partition_buffer,
                                     min_spanning_tree_buffer,
@@ -587,6 +591,68 @@ where
                                 .await
                                 .unwrap();
                                 tx.send(Response::Done).await.unwrap();
+
+                                notify_update.notify_waiters();
+                            });
+                        }
+                        AtomicCmd::BatchInsertVectors {
+                            vectors,
+                            transaction_id,
+                        } => {
+                            let inter_spanning_graph = inter_spanning_graph.clone();
+
+                            let partition_buffer = partition_buffer.clone();
+                            let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
+
+                            let meta_data = meta_data.clone();
+
+                            let cluster_sets = cluster_sets.clone();
+
+                            let notify_update = notify_update.clone();
+
+                            let access_tx = access_tx.clone();
+
+                            #[cfg(feature = "benchmark")]
+                            let benchmark_writer = benchmark_writer.clone();
+                            rt.spawn(async move {
+                                let new_vectors: Vec<_> = vectors
+                                    .into_iter()
+                                    .map(|vector| VectorEntry::from_uuid(vector, Uuid::new_v4()))
+                                    .collect();
+
+                                match batch::add(
+                                    new_vectors.clone(),
+                                    transaction_id,
+                                    meta_data,
+                                    partition_buffer,
+                                    min_spanning_tree_buffer,
+                                    inter_spanning_graph,
+                                    cluster_sets,
+                                    access_tx,
+                                    #[cfg(feature = "benchmark")]
+                                    Benchmark::new("Insert Vector".to_string(), benchmark_writer),
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        // log success
+                                        // send success
+                                    }
+                                    Err(_) => todo!(),
+                                };
+
+                                // let _ = sender.send(Response::Success);
+                                for VectorEntry { id, vector, .. } in new_vectors {
+                                    tx.send(Response::Success(Success::Vector(
+                                        VectorId(id),
+                                        vector.into(),
+                                    )))
+                                    .await
+                                    .unwrap();
+                                }
+                                tx.send(Response::Done).await.unwrap();
+
+                                notify_update.notify_waiters();
 
                                 notify_update.notify_waiters();
                             });
