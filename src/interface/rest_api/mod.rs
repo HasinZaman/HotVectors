@@ -17,6 +17,7 @@ use crate::{
         component::ids::{PartitionId, VectorId},
         AtomicCmd, Cmd, Response, Success,
     },
+    interface::HotRequest,
     vector::{Field, Vector, VectorSerial, VectorSpace},
 };
 
@@ -38,10 +39,6 @@ pub mod cluster;
 pub mod graph;
 pub mod partition;
 pub mod vector;
-
-pub(crate) struct HotRequest<A: Field<A> + Clone + Copy, B: VectorSpace<A> + Sized + Send + Sync> {
-    sender: Arc<Sender<(Cmd<A, B>, Sender<Response<A>>)>>,
-}
 
 pub(crate) trait AddRoute<F> {
     fn add_routes(self) -> Self;
