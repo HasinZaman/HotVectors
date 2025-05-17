@@ -1,9 +1,9 @@
 use std::{
     array,
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
-    fmt::Display,
+    fmt::{Debug, Display},
     fs,
     io::ErrorKind,
     marker::PhantomData,
@@ -129,12 +129,16 @@ impl Iterator for LeastUsedIterator {
     }
 }
 
+#[derive(Debug)]
 pub struct Global;
+
+#[derive(Debug)]
 pub struct Local;
 
+#[derive(Debug)]
 pub struct DataBuffer<
-    A: Clone + Sized + Into<B>,
-    B: Into<A> + FileExtension + Archive,
+    A: Clone + Sized + Into<B> + Debug,
+    B: Into<A> + FileExtension + Archive + Debug,
     S,
     const CAP: usize,
 > where
@@ -155,7 +159,7 @@ pub struct DataBuffer<
 {
     source: String,
 
-    buffer: [Arc<RwLock<Option<A>>>; CAP],
+    buffer: Box<[Arc<RwLock<Option<A>>>; CAP]>,
     used_stack: [RwLock<Option<(usize, usize)>>; CAP],
     pub buffer_size: RwLock<usize>,
 
@@ -167,8 +171,12 @@ pub struct DataBuffer<
     _phantom_data: PhantomData<(B, S)>,
 }
 
-impl<A: Clone + Sized + Into<B>, B: Into<A> + FileExtension + Archive, S, const CAP: usize>
-    DataBuffer<A, B, S, CAP>
+impl<
+        A: Clone + Sized + Into<B> + Debug,
+        B: Into<A> + FileExtension + Archive + Debug,
+        S,
+        const CAP: usize,
+    > DataBuffer<A, B, S, CAP>
 where
     for<'a> &'a A: Into<Uuid>,
     for<'a> <B as Archive>::Archived:
@@ -195,7 +203,7 @@ where
         }
         Self {
             source,
-            buffer: array::from_fn(|_| Arc::new(RwLock::new(None))),
+            buffer: Box::new(array::from_fn(|_| Arc::new(RwLock::new(None)))),
             used_stack: array::from_fn(|_| RwLock::new(None)),
             buffer_size: RwLock::new(0),
             empty_index_stack: RwLock::new(array::from_fn(|i| Some(CAP - 1 - i))),
@@ -203,6 +211,26 @@ where
             index_map: RwLock::new(HashMap::new()),
             _phantom_data: PhantomData,
         }
+    }
+
+    pub async fn copy_local<const MAX_LOADED_LOCAL: usize>(
+        &mut self,
+        transaction_id: Uuid,
+        dir: &str,
+        write_partitions: &HashSet<PartitionId>,
+    ) -> DataBuffer<A, B, Local, MAX_LOADED_LOCAL> {
+        let mut local_buffer =
+            DataBuffer::new(format!("data/local/{}/{dir}", transaction_id.to_string()));
+        for partition_id in write_partitions {
+            let data = resolve_buffer!(ACCESS, self, *partition_id);
+
+            let Some(data) = &*data.read().await else {
+                todo!()
+            };
+
+            resolve_buffer!(PUSH, local_buffer, data.clone());
+        }
+        local_buffer
     }
 
     pub async fn try_save(&self) {
@@ -775,8 +803,8 @@ where
 }
 
 pub async fn flush<
-    A: Clone + Sized + Into<B>,
-    B: Into<A> + FileExtension + Archive,
+    A: Clone + Sized + Into<B> + Debug,
+    B: Into<A> + FileExtension + Archive + Debug,
     const CAP_1: usize,
     const CAP_2: usize,
 >(
