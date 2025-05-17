@@ -5,10 +5,11 @@ use tokio::sync::mpsc::channel;
 
 use crate::{
     db::{AtomicCmd, Cmd, Response, Success},
+    interface::HotRequest,
     vector::{Field, VectorSpace},
 };
 
-use super::{AddRoute, HotRequest};
+use super::AddRoute;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct RequestedPartitions {

@@ -10,10 +10,11 @@ use uuid::Uuid;
 
 use crate::{
     db::{component::ids::PartitionId, AtomicCmd, Cmd, Response, Success},
+    interface::HotRequest,
     vector::{Field, VectorSerial, VectorSpace},
 };
 
-use super::{partition::RequestedPartitions, AddRoute, HotRequest};
+use super::{partition::RequestedPartitions, AddRoute};
 
 #[derive(Serialize, Deserialize)]
 pub struct VectorData<T> {
@@ -194,37 +195,25 @@ where
     let mut data_recvs = Vec::with_capacity(payload.len());
     let mut results = Vec::with_capacity(payload.len());
     println!("INSERT BATCH VECTOR");
-    for vector in payload {
-        let (tx, mut rx) = channel(2);
 
-        let vector = vector.vector;
-        println!("{:?}", vector);
+    let (tx, rx) = channel(payload.len() + 1);
 
-        let _ = state
-            .sender
-            .send((
-                Cmd::Atomic(AtomicCmd::InsertVector {
-                    vector: B::try_from(vector).unwrap(),
-                    transaction_id: None,
-                }),
-                tx.clone(),
-            ))
-            .await;
-        //
-        data_recvs.push(rx);
-        // let inserted_id = match rx.recv().await {
-        //     Some(Response::Success(Success::Vector(id, _))) => id,
-        //     None => {
-        //         todo!()
-        //     }
-        //     bad => {
-        //         println!("{bad:?}");
-        //         todo!()
-        //     }
-        // };
-        // rx.recv().await;
-        // results.push(inserted_id.0.to_string());
-    }
+    let _ = state
+        .sender
+        .send((
+            Cmd::Atomic(AtomicCmd::BatchInsertVectors {
+                vectors: payload
+                    .into_iter()
+                    .map(|load| B::try_from(load.vector).unwrap())
+                    .collect(),
+                transaction_id: None,
+            }),
+            tx.clone(),
+        ))
+        .await;
+
+    data_recvs.push(rx);
+
     for mut rx in data_recvs {
         let inserted_id = match rx.recv().await {
             Some(Response::Success(Success::Vector(id, _))) => id,
@@ -236,7 +225,7 @@ where
                 todo!()
             }
         };
-        rx.recv().await;
+        // rx.recv().await;
         results.push(inserted_id.0.to_string());
     }
 

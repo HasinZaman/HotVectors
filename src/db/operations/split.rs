@@ -566,14 +566,14 @@ impl<
         partition: &'a Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
         graph: &'a IntraPartitionGraph<A>,
     ) -> [PartitionSubSet<'a, A, B, PARTITION_CAP, VECTOR_CAP>; SPLITS] {
-        println!("Tree split");
+        // println!("Tree split");
 
         let mut visited_nodes: HashSet<&VectorId> = HashSet::new();
         let mut first_tree_subset = PartitionSubSet::new(partition);
         let mut remaining_points_subset = PartitionSubSet::new(partition);
 
         let all_partition_ids: Vec<_> = partition.iter().map(|v| v.id).collect();
-        println!("All partition vector IDs: {:?}", all_partition_ids);
+        // println!("All partition vector IDs: {:?}", all_partition_ids);
 
         let mut found_first_tree = false;
 
@@ -582,18 +582,18 @@ impl<
                 continue;
             }
 
-            println!("\nStarting new DFS from node: {:?}", node);
+            // println!("\nStarting new DFS from node: {:?}", node);
             let mut stack = vec![node];
             let mut current_tree_nodes = vec![];
 
             while let Some(current_node) = stack.pop() {
                 if visited_nodes.insert(current_node) {
-                    println!("Visiting node: {:?}", current_node);
+                    // println!("Visiting node: {:?}", current_node);
                     current_tree_nodes.push(current_node);
 
                     for neighbor in graph.0.neighbors(graph.1[current_node]) {
                         let neighbor_id = graph.0.node_weight(neighbor).unwrap();
-                        println!("Neighbor of {:?}: {:?}", current_node, neighbor_id);
+                        // println!("Neighbor of {:?}: {:?}", current_node, neighbor_id);
 
                         if !visited_nodes.contains(neighbor_id) {
                             stack.push(neighbor_id);
@@ -602,18 +602,18 @@ impl<
                 }
             }
 
-            println!(
-                "Finished DFS tree, found {} nodes: {:?}",
-                current_tree_nodes.len(),
-                current_tree_nodes
-            );
+            // println!(
+            //     "Finished DFS tree, found {} nodes: {:?}",
+            //     current_tree_nodes.len(),
+            //     current_tree_nodes
+            // );
 
             let target_subset = if !found_first_tree {
-                println!("Populating first tree subset");
+                // println!("Populating first tree subset");
                 found_first_tree = true;
                 &mut first_tree_subset
             } else {
-                println!("Populating remaining points subset");
+                // println!("Populating remaining points subset");
                 &mut remaining_points_subset
             };
 
