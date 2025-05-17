@@ -1,15 +1,13 @@
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     fmt::Debug,
     fs,
-    marker::PhantomData,
     sync::Arc,
 };
 
-use heapify::{make_heap, pop_heap};
 use petgraph::visit::EdgeRef;
-use spade::{DelaunayTriangulation, HasPosition, Triangulation};
+use spade::HasPosition;
 use tokio::sync::{mpsc::Sender, oneshot, RwLock};
 use tracing::{event, Level};
 use uuid::Uuid;
@@ -33,20 +31,21 @@ use crate::{
         component::{
             cluster::ClusterSet,
             data_buffer::{flush, BufferError, DataBuffer, Global, Local},
-            graph::{GraphSerial, IntraPartitionGraph, ReConstruct, UpdateTree},
-            ids::{ClusterId, PartitionId, VectorId},
+            graph::{GraphSerial, IntraPartitionGraph, UpdateTree},
+            ids::{PartitionId, VectorId},
             meta::Meta,
             partition::{
-                self, ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial,
-                VectorEntry, VectorEntrySerial,
+                ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
+                VectorEntrySerial,
             },
         },
         operations::{
-            cluster::{self, remove_cluster_edge, update_cluster},
+            add::{create_local_inter_graph, create_local_meta, expand, get_required_partitions},
+            cluster::{remove_cluster_edge, update_cluster},
             merge::{merge_partition_into, MergeError},
             split::{
                 calculate_number_of_trees, split_partition, split_partition_into_trees,
-                FirstTreeSplitStrategy, KMean, MaxAttempt, BFS,
+                FirstTreeSplitStrategy, KMean, MaxAttempt,
             },
         },
     },
@@ -55,81 +54,7 @@ use crate::{
 };
 
 use super::InterPartitionGraph;
-
-macro_rules! lock {
-    ( $( ($lock:expr, READ) ),+ $(,)? ) => {{
-        loop {
-            let try_result = async {
-                $(
-                    let guard_ $lock = match $lock.try_read() {
-                        Ok(g) => g,
-                        Err(_) => return None,
-                    }
-                )+
-
-                Some((
-                    $(
-                        guard_ $lock
-                    ),+
-                ))
-            }.await;
-
-            if let Some(guards) = try_result {
-                break guards;
-            }
-
-            tokio::task::yield_now().await;
-        }
-    }};
-    ( $( ($lock:expr, WRITE) ),+ $(,)? ) => {{
-        loop {
-            let try_result = async {
-                $(
-                    let guard_ $lock = match $lock.try_write() {
-                        Ok(g) => g,
-                        Err(_) => return None,
-                    }
-                )+
-
-                Some((
-                    $(
-                        guard_ $lock
-                    ),+
-                ))
-            }.await;
-
-            if let Some(guards) = try_result {
-                break guards;
-            }
-
-            tokio::task::yield_now().await;
-        }
-    }};
-    ( $( ($lock:expr, LOCK) ),+ $(,)? ) => {{
-        loop {
-            let try_result = async {
-                $(
-                    let guard_ $lock = match $lock.try_write() {
-                        Ok(g) => g,
-                        Err(_) => return None,
-                    }
-                )+
-
-                Some((
-                    $(
-                        guard_ $lock
-                    ),+
-                ))
-            }.await;
-
-            if let Some(guards) = try_result {
-                break guards;
-            }
-
-            tokio::task::yield_now().await;
-        }
-    }};
-}
+use crate::db::operations::add::get_neighbors;
 
 pub async fn add<
     A: PartialEq
@@ -536,109 +461,36 @@ where
         // mut local_cluster_sets,
     ) = {
         let local_meta_data = {
-            let mut local_meta_data = HashMap::new();
-
-            let meta_data = &*meta_data.read().await;
-
-            for partition_id in acquired_partitions.iter() {
-                let data = &*meta_data[&**partition_id].read().await;
-
-                // RwLock may not be required as no data needs to be synced over multiple threads
-                // potentially be required in the future to multi-thread mst updating
-                local_meta_data.insert(**partition_id, Arc::new(RwLock::new(data.clone())));
-            }
-
-            local_meta_data
+            let meta_data: &HashMap<Uuid, Arc<RwLock<Meta<A, B>>>> = &*meta_data.read().await;
+            create_local_meta(&meta_data, &acquired_partitions).await
         };
 
         let local_inter_graph = {
-            let mut local_inter_graph = InterPartitionGraph::new();
-
-            let inter_graph = &*inter_graph.read().await;
-
-            for partition_id in acquired_partitions.iter() {
-                local_inter_graph.add_node(*partition_id);
-            }
-
-            let mut inserted_edges: HashSet<((PartitionId, VectorId), (PartitionId, VectorId))> =
-                HashSet::new();
-
-            for partition_id in acquired_partitions.iter() {
-                for edge_ref in inter_graph.0.edges(inter_graph.1[partition_id]) {
-                    let (weight, start, end) = edge_ref.weight();
-
-                    if inserted_edges.contains(&(*start, *end))
-                        || inserted_edges.contains(&(*end, *start))
-                    {
-                        continue;
-                    }
-                    if !acquired_partitions.contains(&start.0) {
-                        continue;
-                    }
-                    if !acquired_partitions.contains(&end.0) {
-                        continue;
-                    }
-
-                    inserted_edges.insert((*start, *end));
-                    inserted_edges.insert((*end, *start));
-
-                    local_inter_graph.add_edge(start.0, end.0, (*weight, *start, *end));
-                }
-            }
-
-            local_inter_graph
+            let inter_graph: &InterPartitionGraph<A> = &*inter_graph.read().await;
+            create_local_inter_graph(&acquired_partitions, &inter_graph)
         };
 
-        let mut local_partition_buffer: DataBuffer<
+        let local_partition_buffer: DataBuffer<
             Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
             PartitionSerial<A>,
             Local,
             MAX_LOADED,
-        > = {
-            let mut local_partition_buffer = DataBuffer::new(format!(
-                "data/local/{}/partitions",
-                transaction_id.to_string()
-            ));
-
-            let partition_buffer = &mut *partition_buffer.write().await;
-
-            for partition_id in &write_partitions {
-                let partition = resolve_buffer!(ACCESS, partition_buffer, *partition_id);
-
-                let Some(partition) = &*partition.read().await else {
-                    todo!()
-                };
-
-                resolve_buffer!(PUSH, local_partition_buffer, partition.clone());
-            }
-
-            local_partition_buffer
-        };
+        > = partition_buffer
+            .write()
+            .await
+            .copy_local(transaction_id, "partition", &write_partitions)
+            .await;
 
         let local_mst_buffer: DataBuffer<
             IntraPartitionGraph<A>,
             GraphSerial<A>,
             Local,
             MAX_LOADED,
-        > = {
-            let mut local_mst_buffer =
-                DataBuffer::new(format!("data/local/{}/graph", transaction_id.to_string()));
-
-            let mst_buffer = &mut *mst_buffer.write().await;
-
-            for partition_id in &write_partitions {
-                let mst = resolve_buffer!(ACCESS, mst_buffer, *partition_id);
-
-                let Some(mst) = &*mst.read().await else {
-                    todo!()
-                };
-
-                resolve_buffer!(PUSH, local_mst_buffer, mst.clone());
-            }
-
-            local_mst_buffer
-        };
-
+        > = mst_buffer
+            .write()
+            .await
+            .copy_local(transaction_id, "graph", &write_partitions)
+            .await;
         // let local_cluster_sets = 'cluster_sets: {
         //     let cluster_sets = &*cluster_sets.read().await;
 
@@ -873,7 +725,8 @@ where
                 .into_iter()
                 .chain(neighbor_ids.clone())
                 .collect::<HashSet<_>>();
-            let mut dist_map: HashMap<VectorId, A> = cached_dist_map.into_iter()
+            let mut dist_map: HashMap<VectorId, A> = cached_dist_map
+                .into_iter()
                 .map(|(id, val)| (VectorId(id), val))
                 .collect();
 
@@ -916,11 +769,8 @@ where
                     // get closet_id & dist
                     // get get closet dist for each partition
                     for partition in &partitions {
-                        for VectorEntry{id, vector, ..} in partition.iter() {
-                            dist_map.insert(
-                                VectorId(*id),
-                                B::dist(&new_vector.vector, vector)
-                            );
+                        for VectorEntry { id, vector, .. } in partition.iter() {
+                            dist_map.insert(VectorId(*id), B::dist(&new_vector.vector, vector));
                         }
 
                         let id = PartitionId(partition.id);
@@ -955,7 +805,7 @@ where
                                 continue;
                             };
 
-                            let Some((unload_idx, unload_id)) = least_used.next() else {
+                            let Some((_unload_idx, unload_id)) = least_used.next() else {
                                 break;
                             };
 
@@ -1017,10 +867,11 @@ where
 
             let Ok(tmp_new_edges) = min_span_tree.update(
                 VectorId(new_vector.id),
-                &dist_map.iter()
+                &dist_map
+                    .iter()
                     .filter(|(id, _)| min_span_tree.1.contains_key(id))
                     .map(|(id, val)| (*val, *id))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
             ) else {
                 todo!();
             };
@@ -1137,7 +988,6 @@ where
 
                     let Some((_, partition_trail)) = partition_trail else {
                         panic!("Failed to find partition trail from {closet_partition_id:?} -> {target_partition_id:?}\n{inter_graph:#?}");
-                        todo!()
                     };
 
                     event!(Level::DEBUG, "partition_trail:\n{partition_trail:?}");
@@ -1194,18 +1044,25 @@ where
                             let hints = match hints_cache
                                 .contains_key(&(closet_partition_id, VectorId(new_vector.id)))
                             {
-                                true => &hints_cache[&(closet_partition_id, VectorId(new_vector.id))],
+                                true => {
+                                    &hints_cache[&(closet_partition_id, VectorId(new_vector.id))]
+                                }
                                 false => {
                                     hints_cache.insert(
                                         (closet_partition_id, VectorId(new_vector.id)),
-                                        min_span_tree.dijkstra_weights(VectorId(new_vector.id)).unwrap(),
+                                        min_span_tree
+                                            .dijkstra_weights(VectorId(new_vector.id))
+                                            .unwrap(),
                                     );
 
                                     cached_partition_hints
                                         .entry(closet_partition_id)
                                         .or_insert_with(|| {
                                             let mut set = HashSet::new();
-                                            set.insert((closet_partition_id, VectorId(new_vector.id)));
+                                            set.insert((
+                                                closet_partition_id,
+                                                VectorId(new_vector.id),
+                                            ));
 
                                             set
                                         })
@@ -1559,17 +1416,18 @@ where
                             };
 
                             let _ = min_span_tree.remove_edge(vector_id_1, vector_id_2).unwrap();
-                            
-                            let [pair_1, pair_2] = split_partition::<
-                                A,
-                                B,
-                                FirstTreeSplitStrategy,
-                                PARTITION_CAP,
-                                VECTOR_CAP,
-                            >(
-                                partition, min_span_tree, &mut local_inter_graph
-                            )
-                            .unwrap();
+
+                            let [pair_1, pair_2] =
+                                split_partition::<
+                                    A,
+                                    B,
+                                    FirstTreeSplitStrategy,
+                                    PARTITION_CAP,
+                                    VECTOR_CAP,
+                                >(
+                                    partition, min_span_tree, &mut local_inter_graph
+                                )
+                                .unwrap();
                             // split_partition_into_trees(partition, min_span_tree, inter_graph)
                             //     .unwrap();
 
@@ -1686,7 +1544,6 @@ where
 
                         let Some((_, partition_trail)) = partition_trail else {
                             panic!("Failed to find partition trail from {closet_partition_id:?} -> {target_partition_id:?}\n{inter_graph:#?}");
-                            todo!()
                         };
 
                         event!(Level::DEBUG, "partition_trail:\n{partition_trail:?}");
@@ -1701,7 +1558,6 @@ where
 
         (new_edges, deleted_edges)
     };
-
 
     // merge splits
     {
@@ -1889,8 +1745,8 @@ where
 
                 // remove edges
                 for (id_1, id_2) in global_edges.difference(&local_edges) {
-                    inter_graph.remove_edge(*id_1, *id_2);
-                    inter_graph.remove_edge(*id_2, *id_1);
+                    let _ = inter_graph.remove_edge(*id_1, *id_2);
+                    let _ = inter_graph.remove_edge(*id_2, *id_1);
                 }
 
                 // add new edges
@@ -1939,6 +1795,7 @@ where
 
     Ok(())
 }
+
 fn add_into_partition<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy + PartialEq + From<VectorSerial<A>>,
@@ -1959,311 +1816,4 @@ fn add_into_partition<
     partition.size = partition.size + 1;
 
     Ok(())
-}
-
-struct DelaunayVertex<A: Into<f32>, B: HasPosition<Scalar = f32>> {
-    id: PartitionId,
-    vertex: B,
-    _phantom: PhantomData<A>,
-}
-impl<A: Debug + Into<f32>, B: HasPosition<Scalar = f32>> HasPosition for DelaunayVertex<A, B> {
-    type Scalar = f32;
-
-    fn position(&self) -> spade::Point2<Self::Scalar> {
-        self.vertex.position()
-    }
-}
-
-async fn get_neighbors<
-    A: PartialEq
-        + PartialOrd
-        + Clone
-        + Copy
-        + Field<A>
-        + for<'a> rkyv::Serialize<
-            rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rancor::Error,
-            >,
-        > + Debug
-        + Extremes,
-    B: VectorSpace<A>
-        + Sized
-        + Clone
-        + Copy
-        + PartialEq
-        + Extremes
-        + From<VectorSerial<A>>
-        + Debug
-        + HasPosition<Scalar = f32>,
-    const VECTOR_CAP: usize,
->(
-    inter_graph: &InterPartitionGraph<A>,
-    closet_partition_id: PartitionId,
-    meta_data: &HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>,
-) -> Vec<PartitionId>
-where
-    f32: From<A>,
-{
-    let graph_neighbors = inter_graph
-        .0
-        .edges(inter_graph.1[&closet_partition_id])
-        .map(|edge| edge.weight())
-        .map(|edge| (edge.1 .0, edge.2 .0))
-        .map(
-            |(partition_id_1, partition_id_2)| match partition_id_1 == closet_partition_id {
-                true => partition_id_2,
-                false => partition_id_1,
-            },
-        )
-        // .flatten()
-        .collect::<HashSet<PartitionId>>()
-        .drain()
-        .collect();
-
-    if inter_graph.1.len() < 3 {
-        return graph_neighbors;
-    }
-
-    let mut triangulation: DelaunayTriangulation<DelaunayVertex<A, B>> =
-        DelaunayTriangulation::new();
-
-    if VECTOR_CAP > 2 {
-        // let data: Vec<Vec<f32>> = Vec::new();
-
-        // for (id, meta_data) in meta_data {
-        //     let meta_data = &*meta_data.read().await;
-
-        //     let centroid = meta_data.centroid;
-
-        //     let vertex = DelaunayVertex {
-        //         id: PartitionId(*id),
-        //         vertex: centroid,
-        //         _phantom: PhantomData::<A>,
-        //     };
-        //     data.append(vertex.into());
-        // }
-
-        // let model = umap(data);
-
-        // let transformed = model.transform(data);
-
-        // for data in transformed {
-        //     let _ = triangulation.insert(data);
-        // }
-        todo!()
-    } else {
-        for (id, meta) in meta_data {
-            let meta = &*meta.read().await;
-
-            let centroid = meta.centroid;
-
-            let vertex = DelaunayVertex {
-                id: PartitionId(*id),
-                vertex: centroid,
-                _phantom: PhantomData::<A>,
-            };
-            let _ = triangulation.insert(vertex);
-        }
-    }
-
-    triangulation
-        .inner_faces()
-        .filter(|face_handle| {
-            let vertices = face_handle.vertices();
-
-            vertices
-                .iter()
-                .any(|vertex| vertex.data().id == closet_partition_id)
-        })
-        .flat_map(|face_handle| {
-            face_handle
-                .adjacent_edges()
-                .iter()
-                .map(|edge_handle| [edge_handle.from().data().id, edge_handle.to().data().id])
-                .filter(|[from, to]| from == &closet_partition_id || to == &closet_partition_id)
-                .flatten()
-                .collect::<Vec<_>>()
-        })
-        .chain(graph_neighbors.into_iter())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn get_required_partitions<
-    A: PartialEq
-        + PartialOrd
-        + Clone
-        + Copy
-        + Field<A>
-        + for<'a> rkyv::Serialize<
-            rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rancor::Error,
-            >,
-        > + Debug
-        + Extremes,
->(
-    sources: &[PartitionId],
-    sink: &PartitionId,
-    inter_graph: &InterPartitionGraph<A>,
-) -> HashSet<PartitionId> {
-    let mut required_partitions = HashSet::new();
-
-    for source in sources {
-        if source == sink {
-            continue;
-        }
-
-        let (_, path) = inter_graph
-            .find_trail(*source, *sink)
-            .expect("Err in finding trail")
-            .expect(&format!(
-                "Couldn't find a trail from {:?} -> {:?}",
-                source, sink
-            ));
-
-        path.iter().for_each(|((partition_id, _), ..)| {
-            required_partitions.insert(*partition_id);
-        });
-    }
-    required_partitions.insert(*sink);
-
-    required_partitions
-}
-
-// find better name
-fn expand<
-    A: PartialEq
-        + PartialOrd
-        + Clone
-        + Copy
-        + Field<A>
-        + for<'a> rkyv::Serialize<
-            rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rancor::Error,
-            >,
-        > + Debug
-        + Extremes,
->(
-    sources: &[PartitionId],
-    inter_graph: &InterPartitionGraph<A>,
-) -> HashSet<PartitionId> {
-    let mut partitions: HashSet<PartitionId> = sources.iter().map(|x| *x).collect();
-
-    for source in sources {
-        for edge_ref in inter_graph.0.edges(inter_graph.1[source]) {
-            let (_, (partition_id_1, _), (partition_id_2, _)) = edge_ref.weight();
-
-            partitions.insert(*partition_id_1);
-            partitions.insert(*partition_id_2);
-        }
-    }
-
-    partitions
-}
-
-fn split_test_assert<
-    A: PartialEq
-        + PartialOrd
-        + Clone
-        + Copy
-        + Field<A>
-        + for<'a> rkyv::Serialize<
-            rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rancor::Error,
-            >,
-        > + Debug
-        + Extremes,
-    B: VectorSpace<A> + Copy + Debug,
-    const PARTITION_CAP: usize,
-    const VECTOR_CAP: usize,
->(
-    splits: &[(
-        Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-        IntraPartitionGraph<A>,
-    )],
-) {
-    // let splits = vec![(partition, mst)];
-    let mut all_vectors: Vec<VectorEntry<A, B>> = vec![];
-    // 1. Ensure no duplicate vectors across partitions
-    {
-        for (split_partition, _) in splits.iter() {
-            all_vectors.extend(
-                split_partition
-                    .vectors
-                    .iter()
-                    .take(split_partition.size)
-                    .map(|x| x.unwrap()),
-            );
-        }
-        let unique_vectors: HashSet<_> = all_vectors.iter().collect();
-        assert_eq!(
-            all_vectors.len(),
-            unique_vectors.len(),
-            "Duplicate vectors found across splits"
-        );
-    }
-    // 2. Ensure no duplicate vectors in the same split_partition
-    {
-        for (split_partition, _) in splits.iter() {
-            let mut seen_vectors = HashSet::new();
-            for vector in split_partition.vectors.iter().take(split_partition.size) {
-                if let Some(vector) = vector {
-                    assert!(
-                        seen_vectors.insert(VectorId(vector.id)),
-                        "Duplicate vector found within a single partition"
-                    );
-                }
-            }
-        }
-    }
-
-    // 3. Ensure graph-partition consistency
-    {
-        for (split_partition, split_graph) in splits.iter() {
-            let partition_vectors: HashSet<_> =
-                split_partition.iter().map(|x| VectorId(x.id)).collect();
-            let graph_vectors: HashSet<_> = split_graph.1.iter().map(|(id, _)| *id).collect();
-
-            assert_eq!(
-                partition_vectors, graph_vectors,
-                "Mismatch between partition and graph vectors"
-            );
-        }
-    }
-    // 4. Ensure no data loss: vectors in target should remain after splitting
-    {
-        let target_vectors: HashSet<_> = splits
-            .iter()
-            .map(|(partition, _)| partition.iter())
-            .flatten()
-            .cloned()
-            .collect();
-        let result_vectors: HashSet<_> = all_vectors.into_iter().collect();
-
-        assert_eq!(
-            target_vectors, result_vectors,
-            "Some vectors from the target were dropped after splitting"
-        );
-    }
 }
