@@ -9,8 +9,9 @@ use crate::{
     interface::HotRequest,
     vector::{Field, VectorSerial, VectorSpace},
 };
-use std::{fmt::Debug, mem::MaybeUninit, str::FromStr, sync::Arc};
+use std::{fmt::Debug, str::FromStr, sync::Arc};
 
+use futures::FutureExt;
 use rancor::Strategy;
 use rkyv::{
     bytecheck::CheckBytes,
@@ -25,14 +26,14 @@ use rkyv::{
     Archive, Deserialize, DeserializeUnsized, Serialize,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{tcp::OwnedWriteHalf, TcpStream},
     sync::mpsc::{channel, Sender},
+    task::JoinHandle,
 };
 use uuid::Uuid;
 
 type PartitionIdUUid = String;
-type ClusterIdUUid = String;
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 enum ReadCmd<A: Archive> {
@@ -80,6 +81,9 @@ enum TmpResponse<A: Archive + Clone + Copy> {
     Pair(Data<A>, Data<A>),
     // Group(Vec<Data<A>>),
     Data(Data<A>),
+
+    Open,
+    TooManyConnections,
 }
 
 pub async fn input_loop<
@@ -96,13 +100,13 @@ pub async fn input_loop<
         + 'static
         + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rancor::Error>>,
     B: VectorSpace<A> + Sized + Send + Sync + From<VectorSerial<A>> + 'static,
-    BS: TryFrom<Vec<f32>>,
+    // BS: TryFrom<Vec<f32>>,
 >(
     sender: Sender<(Cmd<A, B>, Sender<Response<A>>)>,
     max_conn: Option<usize>,
 ) -> !
 where
-    <BS as TryFrom<Vec<f32>>>::Error: Debug,
+    // <BS as TryFrom<Vec<f32>>>::Error: Debug,
     f32: From<A>,
     VectorSerial<A>: From<B>,
     for<'a> <A as Archive>::Archived:
@@ -122,7 +126,7 @@ where
     // Start the Axum server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
-    let mut workers = Vec::new();
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
     loop {
         let (mut tcp_stream, socket_addr) = match listener.accept().await {
@@ -130,54 +134,119 @@ where
             Err(_) => todo!(),
         };
 
+        workers.retain_mut(|handle: &mut JoinHandle<()>| {
+            match handle.now_or_never() {
+                Some(Ok(_)) => false,
+                Some(Err(_err)) => false,
+                None => true, // Still running, keep it
+            }
+        });
+
+        let reject = match max_conn {
+            Some(max) => workers.len() < max,
+            None => true,
+        };
+
+        if reject {
+            let _ = tokio::spawn(async move {
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&TmpResponse::<A>::TooManyConnections).unwrap();
+
+                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+            })
+            .await;
+            continue;
+        }
+
         let state: Arc<HotRequest<A, B>> = shared_state.clone();
         let worker = tokio::spawn(async move {
-            loop {
-                // Read 4-byte length prefix
-                let mut len_buf = [0u8; 4];
-                if tcp_stream.read_exact(&mut len_buf).await.is_err() {
-                    eprintln!("Client {} disconnected or sent invalid length", socket_addr);
-                    break;
-                }
-                let msg_len = u32::from_le_bytes(len_buf) as usize;
-
-                // Read the full message
-                let mut data_buf = vec![0u8; msg_len];
-                if tcp_stream.read_exact(&mut data_buf).await.is_err() {
-                    eprintln!("Client {} disconnected during payload read", socket_addr);
-                    break;
-                }
-
-                // Deserialize using rkyv
-                match from_bytes::<RequestCmd<A>, rancor::Error>(&data_buf) {
-                    Ok(cmd) => {
-                        println!("[{}] Received: {:?}", socket_addr, cmd);
-
-                        match cmd {
-                            RequestCmd::StartTransaction => todo!(),
-                            RequestCmd::EndTransaction => todo!(),
-                            RequestCmd::Read(cmd) => {
-                                read_cmd(state.clone(), cmd, &mut tcp_stream).await
-                            }
-                            RequestCmd::InsertVector(vector_serial) => {
-                                insert_vector(state.clone(), vector_serial, &mut tcp_stream).await
-                            }
-                            RequestCmd::CreateCluster(threshold) => create_cluster(state.clone(), threshold, &mut tcp_stream).await,
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Deserialization failed from {}: {:?}", socket_addr, e);
-                    }
-                }
-            }
-
-            println!("Connection closed: {}", socket_addr);
+            worker_loop(tcp_stream, socket_addr, state).await;
         });
 
         workers.push(worker);
     }
 
     // panic!("Server stopped unexpectedly");
+}
+
+async fn worker_loop<
+    A: Archive
+        + Field<A>
+        + Clone
+        + Copy
+        + Sized
+        + Send
+        + Sync
+        + Debug
+        + From<f32>
+        + Archive
+        + 'static
+        + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rancor::Error>>,
+    B: VectorSpace<A> + Sized + Send + Sync + From<VectorSerial<A>> + 'static,
+>(
+    mut tcp_stream: TcpStream,
+    socket_addr: std::net::SocketAddr,
+    state: Arc<HotRequest<A, B>>,
+) where
+    f32: From<A>,
+    VectorSerial<A>: From<B>,
+    for<'a> <A as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
+    [ArchivedVectorEntrySerial<A>]:
+        DeserializeUnsized<[VectorEntrySerial<A>], Strategy<Pool, rancor::Error>>,
+    [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+    [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
+        DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
+    f32: From<A>,
+    <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
+{
+    {
+        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Open).unwrap();
+
+        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+    }
+
+    let (mut reader, mut writer) = tcp_stream.into_split();
+
+    let (tx, mut rx) = channel(16);
+
+    let _input_worker = tokio::spawn(async move {
+        loop {
+            let mut len_buf = [0u8; 4];
+            if reader.read_exact(&mut len_buf).await.is_err() {
+                eprintln!("Client {} disconnected or sent invalid length", socket_addr);
+                return;
+            }
+            let msg_len = u32::from_le_bytes(len_buf) as usize;
+
+            // Read the full message
+            let mut data_buf = vec![0u8; msg_len];
+            if reader.read_exact(&mut data_buf).await.is_err() {
+                eprintln!("Client {} disconnected during payload read", socket_addr);
+                return;
+            }
+
+            let _ = tx
+                .send(from_bytes::<RequestCmd<A>, rancor::Error>(&data_buf).unwrap())
+                .await;
+        }
+    });
+
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            RequestCmd::StartTransaction => todo!(),
+            RequestCmd::EndTransaction => todo!(),
+            RequestCmd::Read(cmd) => read_cmd(state.clone(), cmd, &mut writer).await,
+            RequestCmd::InsertVector(vector_serial) => {
+                insert_vector(state.clone(), vector_serial, &mut writer).await
+            }
+            RequestCmd::CreateCluster(threshold) => {
+                create_cluster(state.clone(), threshold, &mut writer).await
+            }
+        }
+    }
+
+    println!("Connection closed: {}", socket_addr);
 }
 
 async fn read_cmd<
@@ -192,12 +261,12 @@ async fn read_cmd<
 >(
     state: Arc<HotRequest<A, B>>,
     read_cmd: ReadCmd<A>,
-    tcp_stream: &mut TcpStream,
+    tcp_stream: &mut OwnedWriteHalf,
 ) where
     f32: From<A>,
 {
     match read_cmd {
-        ReadCmd::Meta { filter } => {
+        ReadCmd::Meta { .. } => {
             let (tx, mut rx) = channel(64);
 
             let _ = state
@@ -389,7 +458,7 @@ async fn create_cluster<
 >(
     state: Arc<HotRequest<A, B>>,
     threshold: A,
-    tcp_stream: &mut TcpStream,
+    tcp_stream: &mut OwnedWriteHalf,
 ) where
     f32: From<A>,
 {
@@ -409,12 +478,11 @@ async fn create_cluster<
     };
 
     {
-        let bytes: AlignedVec =
-            to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
+        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
 
         let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
     }
-    
+
     {
         let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
 
@@ -431,7 +499,7 @@ async fn insert_vector<
 >(
     state: Arc<HotRequest<A, B>>,
     vector_serial: VectorSerial<A>,
-    tcp_stream: &mut TcpStream,
+    tcp_stream: &mut OwnedWriteHalf,
 ) {
     let (tx, mut rx) = channel(2);
     let _ = state
