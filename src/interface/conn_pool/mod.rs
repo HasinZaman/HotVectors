@@ -1,7 +1,7 @@
 use crate::{
     db::{
         component::{
-            ids::PartitionId,
+            ids::{PartitionId, VectorId},
             partition::{ArchivedVectorEntrySerial, VectorEntrySerial},
         },
         AtomicCmd, Cmd, Response, Success,
@@ -9,7 +9,7 @@ use crate::{
     interface::HotRequest,
     vector::{Field, VectorSerial, VectorSpace},
 };
-use std::{fmt::Debug, str::FromStr, sync::Arc};
+use std::{collections::HashSet, fmt::Debug, io::ErrorKind, str::FromStr, sync::Arc};
 
 use futures::FutureExt;
 use rancor::Strategy;
@@ -36,10 +36,17 @@ use uuid::Uuid;
 type PartitionIdUUid = String;
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
+enum EdgeType{
+    Intra(PartitionIdUUid),
+    Inter
+}
+
+#[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 enum ReadCmd<A: Archive> {
     Meta { filter: Option<PartitionIdUUid> },
     PartitionVectors { partition_id: PartitionIdUUid },
     ClusterVectors { threshold: A },
+    GraphEdges(EdgeType)
 }
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
@@ -50,13 +57,6 @@ enum RequestCmd<A: Clone + Copy + Archive> {
     InsertVector(VectorSerial<A>),
     CreateCluster(A),
 }
-
-// #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
-// enum IdSerial{
-//     ClusterId(String),
-//     PartitionId(String),
-//     VectorId(String)
-// }
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
 enum Data<A: Archive + Clone + Copy> {
@@ -69,10 +69,13 @@ enum Data<A: Archive + Clone + Copy> {
         size: usize,
         centroid: VectorSerial<A>,
     },
+
+    InterEdge(A, (String, String), (String, String)),
+    IntraEdge(A, String, String),
 }
 
 #[derive(Archive, Debug, Serialize, Deserialize, Clone)]
-enum TmpResponse<A: Archive + Clone + Copy> {
+enum ProtocolMessage<A: Archive + Clone + Copy> {
     // Streaming?
     Start,
     End,
@@ -124,49 +127,58 @@ where
     });
 
     // Start the Axum server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
 
-    let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    let _thread = tokio::spawn(async move {
+        println!("Starting conn pool");
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
-    loop {
-        let (mut tcp_stream, socket_addr) = match listener.accept().await {
-            Ok((tcp_stream, socket_addr)) => (tcp_stream, socket_addr),
-            Err(_) => todo!(),
-        };
+        loop {
+            let (mut tcp_stream, socket_addr) = match listener.accept().await {
+                Ok((tcp_stream, socket_addr)) => (tcp_stream, socket_addr),
+                Err(_) => todo!(),
+            };
 
-        workers.retain_mut(|handle: &mut JoinHandle<()>| {
-            match handle.now_or_never() {
-                Some(Ok(_)) => false,
-                Some(Err(_err)) => false,
-                None => true, // Still running, keep it
+            println!("Got a connection from {:?}", socket_addr);
+
+            workers.retain_mut(|handle: &mut JoinHandle<()>| {
+                match handle.now_or_never() {
+                    Some(Ok(_)) => false,
+                    Some(Err(_err)) => false,
+                    None => true, // Still running, keep it
+                }
+            });
+
+            let valid = match max_conn {
+                Some(max) => workers.len() < max,
+                None => true,
+            };
+
+            if !valid {
+                let _ = tokio::spawn(async move {
+                    let bytes: AlignedVec =
+                        to_bytes::<rancor::Error>(&ProtocolMessage::<A>::TooManyConnections)
+                            .unwrap();
+
+                    write_all(&mut tcp_stream, bytes).await;
+                })
+                .await;
+                continue;
             }
-        });
 
-        let reject = match max_conn {
-            Some(max) => workers.len() < max,
-            None => true,
-        };
+            let state: Arc<HotRequest<A, B>> = shared_state.clone();
+            let worker = tokio::spawn(async move {
+                worker_loop(tcp_stream, socket_addr, state).await;
+            });
 
-        if reject {
-            let _ = tokio::spawn(async move {
-                let bytes: AlignedVec =
-                    to_bytes::<rancor::Error>(&TmpResponse::<A>::TooManyConnections).unwrap();
-
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-            })
-            .await;
-            continue;
+            workers.push(worker);
         }
-
-        let state: Arc<HotRequest<A, B>> = shared_state.clone();
-        let worker = tokio::spawn(async move {
-            worker_loop(tcp_stream, socket_addr, state).await;
-        });
-
-        workers.push(worker);
-    }
-
-    // panic!("Server stopped unexpectedly");
+    })
+    .await
+    .unwrap();
+    panic!("Server stopped unexpectedly");
 }
 
 async fn worker_loop<
@@ -201,9 +213,8 @@ async fn worker_loop<
     <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
 {
     {
-        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Open).unwrap();
-
-        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+        let bytes: AlignedVec = to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Open).unwrap();
+        write_all(&mut tcp_stream, bytes).await;
     }
 
     let (mut reader, mut writer) = tcp_stream.into_split();
@@ -213,22 +224,47 @@ async fn worker_loop<
     let _input_worker = tokio::spawn(async move {
         loop {
             let mut len_buf = [0u8; 4];
-            if reader.read_exact(&mut len_buf).await.is_err() {
-                eprintln!("Client {} disconnected or sent invalid length", socket_addr);
+            if let Err(e) = reader.read_exact(&mut len_buf).await {
+                eprintln!(
+                    "Client {} disconnected or sent invalid length: {}",
+                    socket_addr, e
+                );
                 return;
             }
             let msg_len = u32::from_le_bytes(len_buf) as usize;
 
             // Read the full message
             let mut data_buf = vec![0u8; msg_len];
-            if reader.read_exact(&mut data_buf).await.is_err() {
-                eprintln!("Client {} disconnected during payload read", socket_addr);
-                return;
+            match reader.read_exact(&mut data_buf).await {
+                Ok(_) => {
+                    // Process the data
+                }
+                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => {
+                    eprintln!("Connection was reset by the remote host");
+                    // Handle the connection reset
+                }
+                Err(e) => {
+                    eprintln!("An error occurred: {}", e);
+                    // Handle other errors
+                }
             }
 
-            let _ = tx
-                .send(from_bytes::<RequestCmd<A>, rancor::Error>(&data_buf).unwrap())
-                .await;
+            match from_bytes::<RequestCmd<A>, rancor::Error>(&data_buf) {
+                Ok(cmd) => {
+                    println!("Decoded cmd {:?}", &cmd);
+                    if let Err(e) = tx.send(cmd).await {
+                        eprintln!("Failed to send command for client {}: {}", socket_addr, e);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to deserialize command from client {}: {}",
+                        socket_addr, e
+                    );
+                    return;
+                }
+            }
         }
     });
 
@@ -247,6 +283,15 @@ async fn worker_loop<
     }
 
     println!("Connection closed: {}", socket_addr);
+}
+
+async fn write_all<'w, W: AsyncWriteExt + Unpin>(tcp_stream: &'w mut W, bytes: AlignedVec) {
+    let len = (bytes.len() as u32).to_le_bytes();
+
+    tcp_stream.write_all(&len).await.unwrap();
+    // Send length
+    tcp_stream.write_all(&bytes).await.unwrap();
+    // Send actual data
 }
 
 async fn read_cmd<
@@ -282,9 +327,9 @@ async fn read_cmd<
             // let mut data = Vec::new();
             {
                 let bytes: AlignedVec =
-                    to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
             while let Some(Response::Success(meta_data)) = rx.recv().await {
                 let Success::MetaData(id, size, vector_serial) = meta_data else {
@@ -299,151 +344,274 @@ async fn read_cmd<
 
                 {
                     let bytes: AlignedVec =
-                        to_bytes::<rancor::Error>(&TmpResponse::Data(meta_data)).unwrap();
+                        to_bytes::<rancor::Error>(&ProtocolMessage::Data(meta_data)).unwrap();
 
-                    let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                    write_all(tcp_stream, bytes).await;
                 }
             }
 
             {
-                let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
         }
         ReadCmd::PartitionVectors { partition_id } => {
+                let (tx, mut rx) = channel(64);
+
+                let _ = state
+                    .sender
+                    .send((
+                        Cmd::Atomic(AtomicCmd::Partitions {
+                            ids: vec![PartitionId(Uuid::from_str(&partition_id).unwrap())],
+                        }),
+                        tx,
+                    ))
+                    .await;
+
+                {
+                    let bytes: AlignedVec =
+                        to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
+
+                    write_all(tcp_stream, bytes).await;
+                }
+                while let Some(Response::Success(data)) = rx.recv().await {
+                    match data {
+                        Success::Partition(partition_id) => {
+                            let bytes: AlignedVec =
+                                to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Data(
+                                    Data::PartitionId(partition_id.0.to_string()),
+                                ))
+                                .unwrap();
+
+                            write_all(tcp_stream, bytes).await;
+                        }
+                        Success::Vector(vector_id, vector_serial) => {
+                            let bytes: AlignedVec =
+                                to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Data(Data::Vector(
+                                    Some(vector_id.0.to_string()),
+                                    Some(vector_serial),
+                                )))
+                                .unwrap();
+
+                            write_all(tcp_stream, bytes).await;
+                        }
+                        _ => panic!(""),
+                    };
+                }
+
+                {
+                    let bytes: AlignedVec =
+                        to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
+
+                    write_all(tcp_stream, bytes).await;
+                }
+            }
+        ReadCmd::ClusterVectors { threshold } => {
+                let (tx, mut rx) = channel(64);
+                let _ = state
+                    .sender
+                    .send((
+                        Cmd::Atomic(AtomicCmd::GetClusters {
+                            threshold: threshold,
+                        }),
+                        tx,
+                    ))
+                    .await;
+
+                {
+                    let bytes: AlignedVec =
+                        to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
+
+                    write_all(tcp_stream, bytes).await;
+                }
+
+                while let Some(data) = rx.recv().await {
+                    match data {
+                        Response::Success(Success::Cluster(cluster_id)) => {
+                            let bytes: AlignedVec = to_bytes::<rancor::Error>(
+                                &ProtocolMessage::<A>::Data(Data::ClusterId(cluster_id.0.to_string())),
+                            )
+                            .unwrap();
+
+                            write_all(tcp_stream, bytes).await;
+                        }
+                        Response::Success(Success::Vector(vector_id, _)) => {
+                            let bytes: AlignedVec =
+                                to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Data(Data::Vector(
+                                    Some(vector_id.0.to_string()),
+                                    None,
+                                )))
+                                .unwrap();
+
+                            write_all(tcp_stream, bytes).await;
+                        }
+                        Response::Success(_) => {
+                            panic!()
+                        }
+                        Response::Fail => {
+                            todo!()
+                        }
+                        Response::Done => {
+                            break;
+                        }
+                    }
+                }
+
+                {
+                    let bytes: AlignedVec =
+                        to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
+
+                    write_all(tcp_stream, bytes).await;
+                }
+            }
+        ReadCmd::GraphEdges(EdgeType::Inter) => {
+            {
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
+
+                write_all(tcp_stream, bytes).await;
+            }
+            let partition_ids = {
+                let mut partition_ids = Vec::new();
+                let (tx, mut rx) = channel(64);
+
+                let _ = state
+                    .sender
+                    .send((
+                        Cmd::Atomic(AtomicCmd::GetMetaData {
+                            transaction_id: None,
+                        }),
+                        tx,
+                    ))
+                    .await;
+
+                while let Some(Response::Success(meta_data)) = rx.recv().await {
+                    let Success::MetaData(id, size, vector_serial) = meta_data else {
+                        panic!("")
+                    };
+
+                    partition_ids.push(id);
+                }
+
+                partition_ids
+            };
+
+            let mut visited_edges: HashSet<((PartitionId, VectorId), (PartitionId, VectorId))> = HashSet::new();
+            for id in partition_ids {
+                let (tx, mut rx) = channel(64);
+
+                let _ = state
+                    .sender
+                    .send((
+                        Cmd::Atomic(AtomicCmd::GetInterPartitionGraph {
+                            transaction_id: None,
+                            partition_id: id,
+                        }),
+                        tx,
+                    ))
+                    .await;
+
+                while let Some(Response::Success(data)) = rx.recv().await {
+                    match data {
+                        Success::InterEdge(
+                            (PartitionId(source_partition), VectorId(source_vector)),
+                            (PartitionId(target_partition), VectorId(target_vector)),
+                            dist
+                        ) => {
+                            let id_1 = (
+                                (PartitionId(source_partition), VectorId(source_vector)),
+                                (PartitionId(target_partition), VectorId(target_vector)),
+                            );
+                            let id_2 = (
+                                (PartitionId(target_partition), VectorId(target_vector)),
+                                (PartitionId(source_partition), VectorId(source_vector)),
+                            );
+                            
+                            if visited_edges.contains(&id_1) || visited_edges.contains(&id_2) {
+                                continue;
+                            }
+                            visited_edges.insert(id_1);
+                            visited_edges.insert(id_2);
+
+                            let bytes: AlignedVec =
+                                to_bytes::<rancor::Error>(
+                                    &ProtocolMessage::<A>::Data(
+                                        Data::InterEdge(
+                                            dist,
+                                            (
+                                                source_partition.to_string(),
+                                                source_vector.to_string()
+                                            ),
+                                            (
+                                                target_partition.to_string(),
+                                                target_vector.to_string()
+                                            )
+                                        )
+                                    )
+                                ).unwrap();
+
+                            write_all(tcp_stream, bytes).await;
+                        }
+                        _ => panic!(""),
+                    };
+                }
+            }
+            {
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
+
+                write_all(tcp_stream, bytes).await;
+            }
+        },
+        ReadCmd::GraphEdges(EdgeType::Intra(partition_id)) => {
+            {
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
+
+                write_all(tcp_stream, bytes).await;
+            }
+
             let (tx, mut rx) = channel(64);
 
             let _ = state
                 .sender
                 .send((
-                    Cmd::Atomic(AtomicCmd::Partitions {
-                        ids: vec![PartitionId(Uuid::from_str(&partition_id).unwrap())],
+                    Cmd::Atomic(AtomicCmd::GetPartitionGraph {
+                        transaction_id: None,
+                        partition_id: PartitionId(Uuid::from_str(&partition_id).unwrap()),
                     }),
                     tx,
                 ))
                 .await;
-
-            {
-                let bytes: AlignedVec =
-                    to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
-
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-            }
             while let Some(Response::Success(data)) = rx.recv().await {
                 match data {
-                    Success::Partition(partition_id) => {
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Data(
-                            Data::PartitionId(partition_id.0.to_string()),
-                        ))
-                        .unwrap();
+                    Success::Edge(VectorId(source), VectorId(target), dist) => {
+                        let bytes: AlignedVec =
+                            to_bytes::<rancor::Error>(
+                                &ProtocolMessage::<A>::Data(
+                                    Data::IntraEdge(
+                                        dist,
+                                        source.to_string(),
+                                        target.to_string(),
+                                    )
+                                )
+                            ).unwrap();
 
-                        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-                    }
-                    Success::Vector(vector_id, vector_serial) => {
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Data(
-                            Data::Vector(Some(vector_id.0.to_string()), Some(vector_serial)),
-                        ))
-                        .unwrap();
-
-                        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                        write_all(tcp_stream, bytes).await;
                     }
                     _ => panic!(""),
                 };
             }
-
             {
-                let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
-        }
-        ReadCmd::ClusterVectors { threshold } => {
-            let (tx, mut rx) = channel(64);
-            let _ = state
-                .sender
-                .send((
-                    Cmd::Atomic(AtomicCmd::GetClusters {
-                        threshold: threshold,
-                    }),
-                    tx,
-                ))
-                .await;
-
-            {
-                let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
-
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-            }
-
-            while let Some(data) = rx.recv().await {
-                match data {
-                    Response::Success(Success::Cluster(cluster_id)) => {
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Data(
-                            Data::ClusterId(cluster_id.0.to_string()),
-                        ))
-                        .unwrap();
-
-                        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-                    }
-                    Response::Success(Success::Vector(vector_id, _)) => {
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Data(
-                            Data::Vector(Some(vector_id.0.to_string()), None),
-                        ))
-                        .unwrap();
-
-                        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
-                    }
-                    Response::Success(_) => {
-                        panic!()
-                    }
-                    Response::Fail => {
-                        todo!()
-                    }
-                    Response::Done => {
-                        break;
-                    }
-                }
-            }
-        }
+        },
     }
-
-    // let _ = state
-    //     .sender
-    //     .send((
-    //         Cmd::Atomic(AtomicCmd::InsertVector {
-    //             vector: vector_serial.into(),
-    //             transaction_id: None,
-    //         }),
-    //         tx,
-    //     ))
-    //     .await;
-    // let inserted_id = match rx.recv().await {
-    //     Some(Response::Success(Success::Vector(id, _))) => id,
-    //     None => {
-    //         todo!()
-    //     }
-    //     _ => {
-    //         todo!()
-    //     }
-    // };
-    // match rx.recv().await {
-    //     Some(Response::Done) => {
-    //         let bytes: AlignedVec = to_bytes::<rancor::Error>(
-    //             &(*inserted_id).to_string()
-    //         ).unwrap();
-
-    //         tcp_stream.write_all(
-    //             bytes.as_slice()
-    //         ).await;
-    //     },
-    //     None => {
-    //         todo!()
-    //     }
-    //     _ => {
-    //         todo!()
-    //     }
-    // }
 }
 
 async fn create_cluster<
@@ -478,21 +646,22 @@ async fn create_cluster<
     };
 
     {
-        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
+        let bytes: AlignedVec = to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
 
-        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+        write_all(tcp_stream, bytes).await;
     }
 
     {
-        let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
+        let bytes: AlignedVec = to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
 
-        let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+        write_all(tcp_stream, bytes).await;
     }
 }
 
 async fn insert_vector<
     A: Clone
         + Copy
+        + Debug
         + Field<A>
         + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rancor::Error>>,
     B: VectorSpace<A> + Sized + Send + Sync + From<VectorSerial<A>>,
@@ -502,6 +671,7 @@ async fn insert_vector<
     tcp_stream: &mut OwnedWriteHalf,
 ) {
     let (tx, mut rx) = channel(2);
+    println!("sending {:?}", &vector_serial);
     let _ = state
         .sender
         .send((
@@ -512,9 +682,10 @@ async fn insert_vector<
             tx,
         ))
         .await;
+
     let inserted_id = match rx.recv().await {
         Some(Response::Success(Success::Vector(id, _))) => {
-            TmpResponse::<A>::Data(Data::Vector(Some(id.to_string()), None))
+            ProtocolMessage::<A>::Data(Data::Vector(Some(id.to_string()), None))
         }
         None => {
             todo!()
@@ -527,19 +698,20 @@ async fn insert_vector<
         Some(Response::Done) => {
             {
                 let bytes: AlignedVec =
-                    to_bytes::<rancor::Error>(&TmpResponse::<A>::Start).unwrap();
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::Start).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
             {
                 let bytes: AlignedVec = to_bytes::<rancor::Error>(&inserted_id).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
             {
-                let bytes: AlignedVec = to_bytes::<rancor::Error>(&TmpResponse::<A>::End).unwrap();
+                let bytes: AlignedVec =
+                    to_bytes::<rancor::Error>(&ProtocolMessage::<A>::End).unwrap();
 
-                let _ = tcp_stream.write_all(bytes.as_slice()).await.unwrap();
+                write_all(tcp_stream, bytes).await;
             }
         }
         None => {
