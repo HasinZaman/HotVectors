@@ -5,12 +5,7 @@ pub mod ids;
 pub mod meta;
 pub mod partition;
 pub mod serial;
+// pub mod umap;
 
 #[cfg(feature = "benchmark")]
 pub mod benchmark;
-
-pub trait Initialize {
-    fn initialize_dir() -> bool
-    where
-        Self: Sized;
-}

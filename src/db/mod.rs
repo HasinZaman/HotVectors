@@ -811,7 +811,7 @@ where
                                     Ok(pos) => {
                                         let cluster_set = &cluster_sets[pos];
 
-                                        for cluster_id in cluster_set.get_clusters().await {
+                                        for cluster_id in cluster_set.get_clusters() {
                                             let _ = tx
                                                 .send(Response::Success(Success::Cluster(
                                                     cluster_id,
@@ -819,7 +819,6 @@ where
                                                 .await;
                                             let vector_ids = cluster_set
                                                 .get_cluster_members::<5>(cluster_id)
-                                                .await
                                                 .unwrap();
 
                                             for vec_id in vector_ids {

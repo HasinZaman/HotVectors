@@ -12,31 +12,31 @@ sanity = []
 # rest = ["axum"]
 
 [dependencies]
-uuid = {version = "*", features = ["v4", "serde"]}
-rkyv = {version = "*", features = ["bytecheck", "alloc"]}
+rkyv = {version = "0.8.10", features = ["bytecheck", "alloc", "uuid-1"]}
+uuid = {version = "1.16.0", features = ["v4", "serde"]}
 rancor = "0.1.0"
 serde = {version = "1.0.215", features = ["derive"]}
 petgraph = "0.8.1"
 heapify = "0.2.0"
-chrono = "*"
+chrono = "0.4.*"
 rand = "0.9.0"
 tokio = { version = "1", features = ["full"] }
 
 tracing = "0.1"
 tracing-subscriber = "0.3.19"
 
-async-sqlite = "0.5.0"
+sled = "*"
+# async-sqlite = "0.5.0"
 
 futures = "0.3.31"
 
 # placeholder libraries
 spade = { version = "2.13.1", features = ["serde"]}
-# fast-umap = "0.0.2"
+# fast-umap = "*"
 
 # Conditional dependency for REST API
 axum = { version = "0.8.1", features = ["macros"]}#, optional = true}
 
-# rusqlite = "=0.33.0"
-
 # [patch.crates-io]
-# rusqlite = { version = "=0.33.0" }
+# rusqlite = "0.35.0"
+# libsqlite3-sys = "0.33.0"

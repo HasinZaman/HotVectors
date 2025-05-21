@@ -17,9 +17,11 @@ use rkyv::{
     de::Pool,
     rancor,
     rend::u32_le,
+    ser::{allocator::ArenaHandle, sharing::Share, Serializer},
     tuple::ArchivedTuple3,
+    util::AlignedVec,
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
-    Archive, DeserializeUnsized,
+    Archive, DeserializeUnsized, Serialize,
 };
 
 #[cfg(feature = "benchmark")]
@@ -62,16 +64,9 @@ pub async fn add<
         + Clone
         + Copy
         + Field<A>
-        + for<'a> rkyv::Serialize<
-            rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rancor::Error,
-            >,
-        > + Debug
+        + Archive
+        + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rancor::Error>>
+        + Debug
         + Extremes
         + std::marker::Send
         + std::marker::Sync
@@ -126,6 +121,7 @@ where
     [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
         DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
     f32: From<A>,
+    <A as Archive>::Archived: rkyv::Deserialize<A, Strategy<Pool, rancor::Error>>,
 {
     let transaction_id = match transaction_id {
         Some(transaction_id) => transaction_id,
@@ -430,10 +426,9 @@ where
             {
                 for cluster_set in cluster_sets.iter_mut() {
                     for vector_id in &assigned_vectors {
-                        let cluster_id = cluster_set.new_cluster().await.unwrap();
+                        let cluster_id = cluster_set.new_cluster().unwrap();
                         let _ = cluster_set
                             .new_cluster_from_vector(*vector_id, cluster_id)
-                            .await
                             .unwrap();
                     }
                 }
