@@ -16,6 +16,7 @@ Hot Vectors is a vector database designed with native hierarchical clustering an
 - **Maintain determinism in operations**: Ensure that operations produce consistent and predictable results, which is crucial for reliability in clustering and search tasks.
 - **GPU Optimization**: Leverage GPU acceleration to speed up computations, particularly for large-scale vector operations, nearest neighbor searches, and clustering algorithms.
 - **Expand Clustering Algorithms**: Implement additional clustering techniques such as HDBSCAN and other advanced methods to improve flexibility and accuracy in hierarchical clustering.
+- **Native UMAP Integration**: Implement UMAP directly into the database engine as a built-in dimensionality reduction method. This enables the database to support high-dimensional (n-dim) data while maintaining efficient and meaningful representations for search, clustering, and visualization.
 
 ## Future Goals
 - **Add multiple connection methods**: Implement various ways to connect to the database, allowing for flexibility in integration:
@@ -32,10 +33,12 @@ Hot Vectors is a vector database designed with native hierarchical clustering an
 ![Vectors being inserted into a database](.\demo.gif)
 
 ## Future Optimization
+
 ### Updates of Minimum Spanning Trees
 - [Dynamic Euclidean MST](https://link.springer.com/article/10.1007/BF01228509): Explores efficient methods for maintaining a minimum spanning tree dynamically as the dataset evolves.
 - [Fully Dynamic MST](https://link.springer.com/article/10.1007/BF01944354): Discusses fully dynamic solutions for updating spanning trees, which can be useful in clustering applications.
 
 ### Better Neighbor Detection
-- [Efficient Delaunay Triangulation](https://dl.acm.org/doi/pdf/10.1145/220279.220286): Discusses sequential algorithms for constructing Delaunay triangulations, comparing divide-and-conquer, sweepline, and incremental approaches.Covers techniques for improving the accuracy and speed of nearest neighbor searches, a core component of vector databases.
-- [Approximate UMAP for Real-Time Projections](https://arxiv.org/pdf/2404.04001): Introduces a novel variant of UMAP (aUMAP) designed for rapid, real-time data projections, significantly reducing computational costs while maintaining accuracy.A research paper detailing the latest methodologies in neighbor detection, which can enhance clustering and search performance.
+- [Efficient Delaunay Triangulation](https://dl.acm.org/doi/pdf/10.1145/220279.220286): Discusses sequential algorithms for constructing Delaunay triangulations, comparing divide-and-conquer, sweepline, and incremental approaches. Covers techniques for improving the accuracy and speed of nearest neighbor searches, a core component of vector databases.
+- [Approximate UMAP for Real-Time Projections](https://arxiv.org/pdf/2404.04001): Introduces a novel variant of UMAP (aUMAP) designed for rapid, real-time data projections, significantly reducing computational costs while maintaining accuracy.
+- [Parametric UMAP embeddings for representation and semi-supervised learning](https://arxiv.org/pdf/2009.12981): Extends UMAP to learn a parametric mapping via neural networks, enabling fast embeddings of new data and improved regularization in autoencoders. Useful for online vector insertion and semi-supervised learning through structural embedding of unlabeled data.
