@@ -42,3 +42,57 @@ Hot Vectors is a vector database designed with native hierarchical clustering an
 - [Efficient Delaunay Triangulation](https://dl.acm.org/doi/pdf/10.1145/220279.220286): Discusses sequential algorithms for constructing Delaunay triangulations, comparing divide-and-conquer, sweepline, and incremental approaches. Covers techniques for improving the accuracy and speed of nearest neighbor searches, a core component of vector databases.
 - [Approximate UMAP for Real-Time Projections](https://arxiv.org/pdf/2404.04001): Introduces a novel variant of UMAP (aUMAP) designed for rapid, real-time data projections, significantly reducing computational costs while maintaining accuracy.
 - [Parametric UMAP embeddings for representation and semi-supervised learning](https://arxiv.org/pdf/2009.12981): Extends UMAP to learn a parametric mapping via neural networks, enabling fast embeddings of new data and improved regularization in autoencoders. Useful for online vector insertion and semi-supervised learning through structural embedding of unlabeled data.
+
+## TODO
+
+### Currently Tasks
+
+1. **(Medium)** Finalize and test KNN query implementation  
+   _Skills_: Rust, distance metrics, unit testing, API/interface design
+
+2. **(Hard)** Implement vector update operation (delete + reinsert)  
+   _Skills_: Rust, clustering logic, memory safety
+
+3. **(Hard)** Implement vector deletion  
+   _Skills_: Rust, graph maintenance, indexing
+
+4. **(Hard)** GPU-accelerated distance computation  
+   _Skills_: CUDA/wgpu, SIMD, parallel Rust
+
+5. **(Medium)** Implement robust error handling and edge-case testing  
+   _Skills_: Defensive Rust, concurrency testing
+
+6. **(Medium)** Code cleanup and reorganization  
+   _Skills_: Refactoring, idiomatic Rust, file structure cleanup
+
+7. **(Hard)** Improve UMAP: support incremental updates and split into vector vs centroid UMAPs  
+   _Skills_: Rust, dimensionality reduction, online learning
+
+8. **(Hard)** Implement chaining of atomic operations  
+   _Skills_: Command pattern, operation composition
+
+9. **(Hard)** Optimizer for chained operations  
+   _Skills_: Query optimization, DAG rewrite logic
+
+10. **(Medium)** Link vectors to external data (e.g., strings or structured metadata)  
+    _Skills_: Serialization, type-safe associations, schema design
+
+11. **(Medium)** Improve REST API performance  
+    _Skills_: Rust async, actix/tokio, request profiling
+
+12. **(Medium)** Update and improve connection pool management  
+    _Skills_: Resource pooling, concurrency management
+
+13. **(Medium)** Create language bindings (Python/JS/etc.) using connection pool APIs  
+    _Skills_: FFI, language interop, API client development
+
+14. **(Medium)** Add filtering to vector selection/query logic  
+    _Skills_: Query syntax parsing, filter application, indexing
+
+### Future Tasks
+
+15. **(Medium)** Expand REST API capabilities  
+16. **(Easy)** Compile-time toggles for protocol support  
+17. **(Hard)** Add transaction support for atomic multi-vector ops  
+18. **(Medium)** Improve efficiency of batch vector insertions  
+19. **(Hard)** Implement HDBSCAN and other clustering techniques
