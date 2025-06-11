@@ -121,6 +121,45 @@ impl<A: PartialEq + Clone + Copy, const CAP: usize> Vector<A, CAP> {
     }
 }
 
+impl<'a, A: PartialEq + Clone + Copy, const CAP: usize> From<&'a [A; CAP]> for Vector<A, CAP> {
+    fn from(value: &'a [A; CAP]) -> Self {
+        let mut iter = value.iter();
+        Vector(array::from_fn(|_| *(iter.next().unwrap())))
+    }
+}
+impl<'a, A: PartialEq + Clone + Copy, const CAP: usize> From<&'a [A]> for Vector<A, CAP> {
+    fn from(value: &'a [A]) -> Self {
+        if value.len() != CAP {
+            panic!("Invalid size");
+        }
+
+        let mut iter = value.iter();
+        Vector(array::from_fn(|_| *(iter.next().unwrap())))
+    }
+}
+impl<A: PartialEq + Clone + Copy, const CAP: usize> From<Vec<A>> for Vector<A, CAP> {
+    fn from(value: Vec<A>) -> Self {
+        if value.len() != CAP {
+            panic!("Invalid size");
+        }
+
+        let mut iter = value.iter();
+        Vector(array::from_fn(|_| *(iter.next().unwrap())))
+    }
+}
+
+impl<A: PartialEq + Clone + Copy, const CAP: usize> Into<Vec<A>> for Vector<A, CAP> {
+    fn into(self) -> Vec<A> {
+        self.0.to_vec()
+    }
+}
+
+impl<A: PartialEq + Clone + Copy, const CAP: usize> Into<[A; CAP]> for Vector<A, CAP> {
+    fn into(self) -> [A; CAP] {
+        self.0
+    }
+}
+
 macro_rules! extremes_int {
     [$head: tt , $($tail: tt),+ ] => {
         extremes_int!($head);
