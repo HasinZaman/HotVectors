@@ -10,8 +10,9 @@ use std::{
     time::Duration,
 };
 
-use crate::vector::VectorSerial;
+use crate::vector::{Vector, VectorSerial};
 
+use burn::prelude::Backend;
 #[cfg(feature = "benchmark")]
 use component::benchmark::{benchmark_logger, Benchmark, BenchmarkId};
 
@@ -200,12 +201,13 @@ pub fn file_exists(dir: &str, file_name: &str, extension: &str) -> bool {
 }
 
 pub fn db_loop<
-    A: PartialEq
+    B: Backend,
+    F: PartialEq
         + PartialOrd
         + Clone
         + Copy
         + Extremes
-        + Field<A>
+        + Field<F>
         + Send
         + Sync
         + 'static
@@ -221,39 +223,41 @@ pub fn db_loop<
             >,
         >
         + Debug,
-    B: VectorSpace<A>
+    V: VectorSpace<F>
         + Sized
         + Clone
         + Copy
         + Send
         + Sync
         + Sized
-        + From<VectorSerial<A>>
+        + From<VectorSerial<F>>
         + Extremes
         + PartialEq
         + 'static
-        + Debug
-        + HasPosition<Scalar = f32>,
+        + Debug,
+    // + HasPosition<Scalar = f32>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
     const MAX_THREADS: usize,
 >(
     // input channel
-    mut cmd_input: Receiver<(Cmd<A, B>, Sender<Response<A>>)>,
+    mut cmd_input: Receiver<(Cmd<F, V>, Sender<Response<F>>)>,
     // logger: Sender<State<AtomicCmd<A, B>>>,
     // log: Log<A, B, 5000>,
 ) -> !
 where
-    for<'a> <A as Archive>::Archived:
+    for<'a> <F as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
-    [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
+    [<F as Archive>::Archived]: DeserializeUnsized<[F], Strategy<Pool, rancor::Error>>,
 
-    [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
-        DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
-    VectorSerial<A>: From<B>,
-    <A as Archive>::Archived: Deserialize<A, Strategy<Pool, rancor::Error>>,
-    f32: From<A>,
+    [ArchivedTuple3<u32_le, u32_le, <F as Archive>::Archived>]:
+        DeserializeUnsized<[(usize, usize, F)], Strategy<Pool, rancor::Error>>,
+    VectorSerial<F>: From<V>,
+    <F as Archive>::Archived: Deserialize<F, Strategy<Pool, rancor::Error>>,
+    f32: From<F>,
+    Vector<f32, VECTOR_CAP>: From<V>,
+    Vector<f32, 2>: From<V>,
 {
     event!(Level::INFO, "🔥 HOT VECTOR START UP 👠👠");
 
@@ -267,22 +271,22 @@ where
     const GLOBAL_MIN_SPAN_FILE: &str = "global_min_span";
 
     let partition_buffer = Arc::new(RwLock::new(DataBuffer::<
-        Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-        PartitionSerial<A>,
+        Partition<F, V, PARTITION_CAP, VECTOR_CAP>,
+        PartitionSerial<F>,
         Global,
         MAX_LOADED,
     >::new(PARTITION_DIR.into())));
     let min_spanning_tree_buffer = Arc::new(RwLock::new(DataBuffer::<
-        IntraPartitionGraph<A>,
-        GraphSerial<A>,
+        IntraPartitionGraph<F>,
+        GraphSerial<F>,
         Global,
         MAX_LOADED,
     >::new(MIN_SPAN_DIR.into())));
-    let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
-        Arc::new(RwLock::new(InterPartitionGraph::<A>::new()));
-    let meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>> =
+    let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<F>>> =
+        Arc::new(RwLock::new(InterPartitionGraph::<F>::new()));
+    let meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<F, V>>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    let cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>> = Arc::new(RwLock::new(Vec::new()));
+    let cluster_sets: Arc<RwLock<Vec<ClusterSet<F>>>> = Arc::new(RwLock::new(Vec::new()));
 
     // check if file environment
     event!(Level::INFO, "FILE CHECK🗄️🗄️");
@@ -294,7 +298,7 @@ where
         file_exists(
             PERSISTENT_DIR,
             GLOBAL_MIN_SPAN_FILE,
-            InterGraphSerial::<A>::extension(),
+            InterGraphSerial::<F>::extension(),
         ),
     ];
 
@@ -356,8 +360,8 @@ where
                         Arc::new(RwLock::new(Meta::new(
                             PartitionId(id),
                             0,
-                            B::additive_identity(),
-                            (A::max(), A::min()),
+                            V::additive_identity(),
+                            (F::max(), F::min()),
                         ))),
                     );
 
@@ -389,7 +393,7 @@ where
                 {
                     let path = format!(
                         "{PERSISTENT_DIR}//{GLOBAL_MIN_SPAN_FILE}.{}",
-                        InterGraphSerial::<A>::extension()
+                        InterGraphSerial::<F>::extension()
                     );
                     let (mut x, y) = join!(
                         inter_spanning_graph.write(),
@@ -405,7 +409,7 @@ where
                 {
                     let meta_data = &mut *meta_data.write().await;
 
-                    let loaded_data = Meta::<A, B>::load_from_folder(META_DATA_DIR).await;
+                    let loaded_data = Meta::<F, V>::load_from_folder(META_DATA_DIR).await;
 
                     loaded_data.into_iter().for_each(|data| {
                         meta_data.insert(*data.id, Arc::new(RwLock::new(data)));
@@ -416,7 +420,7 @@ where
                 {
                     let cluster_data = &mut *cluster_sets.write().await;
 
-                    let mut loaded_data = ClusterSet::<A>::load_from_folder(CLUSTER_DATA_DIR).await;
+                    let mut loaded_data = ClusterSet::<F>::load_from_folder(CLUSTER_DATA_DIR).await;
 
                     loaded_data.sort();
 
@@ -561,7 +565,7 @@ where
                             rt.spawn(async move {
                                 let value = VectorEntry::from_uuid(vector, id);
 
-                                match single::add(
+                                match single::add::<B, F, V, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>(
                                     value,
                                     transaction_id,
                                     meta_data,
@@ -620,26 +624,27 @@ where
                                     .map(|vector| VectorEntry::from_uuid(vector, Uuid::new_v4()))
                                     .collect();
 
-                                match batch::add(
-                                    new_vectors.clone(),
-                                    transaction_id,
-                                    meta_data,
-                                    partition_buffer,
-                                    min_spanning_tree_buffer,
-                                    inter_spanning_graph,
-                                    cluster_sets,
-                                    access_tx,
-                                    #[cfg(feature = "benchmark")]
-                                    Benchmark::new("Insert Vector".to_string(), benchmark_writer),
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        // log success
-                                        // send success
-                                    }
-                                    Err(_) => todo!(),
-                                };
+                                todo!();
+                                // match batch::add(
+                                //     new_vectors.clone(),
+                                //     transaction_id,
+                                //     meta_data,
+                                //     partition_buffer,
+                                //     min_spanning_tree_buffer,
+                                //     inter_spanning_graph,
+                                //     cluster_sets,
+                                //     access_tx,
+                                //     #[cfg(feature = "benchmark")]
+                                //     Benchmark::new("Insert Vector".to_string(), benchmark_writer),
+                                // )
+                                // .await
+                                // {
+                                //     Ok(_) => {
+                                //         // log success
+                                //         // send success
+                                //     }
+                                //     Err(_) => todo!(),
+                                // };
 
                                 // let _ = sender.send(Response::Success);
                                 for VectorEntry { id, vector, .. } in new_vectors {
@@ -772,7 +777,7 @@ where
                             let meta_data = meta_data.clone();
 
                             let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
-                            let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<A>>> =
+                            let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<F>>> =
                                 inter_spanning_graph.clone();
 
                             let notify_update = notify_update.clone();

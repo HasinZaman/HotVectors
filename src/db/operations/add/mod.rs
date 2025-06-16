@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use bincode::config;
+use burn::{backend::Autodiff, optim::AdamConfig, prelude::Backend};
 use spade::{DelaunayTriangulation, HasPosition, Triangulation};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -17,8 +19,9 @@ use crate::{
     db::component::{
         ids::{PartitionId, VectorId},
         meta::Meta,
+        umap::{model::Model, train_umap, ParamUMap, UMapTrainingConfig},
     },
-    vector::{Extremes, Field, VectorSerial, VectorSpace},
+    vector::{Extremes, Field, Vector, VectorSerial, VectorSpace},
 };
 
 use super::InterPartitionGraph;
@@ -112,11 +115,12 @@ impl<A: Debug + Into<f32>, B: HasPosition<Scalar = f32>> HasPosition for Delauna
 }
 
 pub(super) async fn get_neighbors<
-    A: PartialEq
+    B: Backend,
+    F: PartialEq
         + PartialOrd
         + Clone
         + Copy
-        + Field<A>
+        + Field<F>
         + for<'a> rkyv::Serialize<
             rancor::Strategy<
                 rkyv::ser::Serializer<
@@ -128,23 +132,25 @@ pub(super) async fn get_neighbors<
             >,
         > + Debug
         + Extremes,
-    B: VectorSpace<A>
+    V: VectorSpace<F>
         + Sized
         + Clone
         + Copy
         + PartialEq
         + Extremes
-        + From<VectorSerial<A>>
+        + From<VectorSerial<F>>
         + Debug
-        + HasPosition<Scalar = f32>,
+        + Extremes,
     const VECTOR_CAP: usize,
 >(
-    inter_graph: &InterPartitionGraph<A>,
+    inter_graph: &InterPartitionGraph<F>,
     closet_partition_id: PartitionId,
-    meta_data: &HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>,
+    meta_data: &HashMap<Uuid, Arc<RwLock<Meta<F, V>>>>,
 ) -> Vec<PartitionId>
 where
-    f32: From<A>,
+    f32: From<F>,
+    Vector<f32, VECTOR_CAP>: From<V>,
+    Vector<f32, 2>: HasPosition<Scalar = f32> + From<V>,
 {
     let graph_neighbors = inter_graph
         .0
@@ -166,33 +172,60 @@ where
         return graph_neighbors;
     }
 
-    let mut triangulation: DelaunayTriangulation<DelaunayVertex<A, B>> =
+    let mut triangulation: DelaunayTriangulation<DelaunayVertex<F, Vector<f32, 2>>> =
         DelaunayTriangulation::new();
 
     if VECTOR_CAP > 2 {
-        // let data: Vec<Vec<f32>> = Vec::new();
+        // If VECTOR_CAP is greater than 2, we can use UMAP to project the data into a lower-dimensional space
 
-        // for (id, meta_data) in meta_data {
-        //     let meta_data = &*meta_data.read().await;
+        let mut data: Vec<(PartitionId, Vector<f32, VECTOR_CAP>)> =
+            Vec::with_capacity(meta_data.len());
 
-        //     let centroid = meta_data.centroid;
+        for (id, meta) in meta_data {
+            let meta = &*meta.read().await;
 
-        //     let vertex = DelaunayVertex {
-        //         id: PartitionId(*id),
-        //         vertex: centroid,
-        //         _phantom: PhantomData::<A>,
-        //     };
-        //     data.append(vertex.into());
-        // }
+            if graph_neighbors.contains(&PartitionId(*id)) {
+                data.push((PartitionId(*id), meta.centroid.into()));
+            }
+        }
 
-        // let model = umap(data);
+        let config: UMapTrainingConfig = UMapTrainingConfig {
+            optimizer: AdamConfig::new(),
+            attractive_size: 16,
+            repulsive_size: 8,
+            epoch: 3,
+            seed: 42,
+            learning_rate: 0.01,
+        };
 
-        // let transformed = model.transform(data);
+        let device = <Autodiff<B> as Backend>::Device::default();
+        let mut model = Model::<Autodiff<B>, { VECTOR_CAP }, 3, 16, 2>::new(&device);
 
-        // for data in transformed {
-        //     let _ = triangulation.insert(data);
-        // }
-        todo!()
+        let model = train_umap::<
+            Autodiff<B>,
+            PartitionId,
+            Model<Autodiff<B>, { VECTOR_CAP }, 3, 16, 2>,
+            Vector<f32, VECTOR_CAP>,
+            Vector<f32, 2>,
+            3,
+            VECTOR_CAP,
+            16,
+            2,
+        >(model, data.clone(), config);
+
+        let points = data
+            .iter()
+            .map(|(partition_id, original_vec)| {
+                let projected: Vector<f32, 2> = model.forward(*original_vec);
+                DelaunayVertex {
+                    id: *partition_id,
+                    vertex: projected.into(),
+                    _phantom: PhantomData::<F>,
+                }
+            })
+            .for_each(|point| {
+                triangulation.insert(point);
+            });
     } else {
         for (id, meta) in meta_data {
             let meta = &*meta.read().await;
@@ -201,8 +234,8 @@ where
 
             let vertex = DelaunayVertex {
                 id: PartitionId(*id),
-                vertex: centroid,
-                _phantom: PhantomData::<A>,
+                vertex: centroid.into(),
+                _phantom: PhantomData::<F>,
             };
             let _ = triangulation.insert(vertex);
         }
