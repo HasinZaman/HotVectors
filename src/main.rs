@@ -10,7 +10,7 @@ use HotVectors::vector::Vector;
 
 use HotVectors::db::component::{ids::PartitionId, partition::VectorEntry};
 
-const VECTOR_CAP: usize = 128;
+const VECTOR_CAP: usize = 384;
 
 fn main() {
     // test umap trainer
@@ -106,9 +106,9 @@ fn main() {
                 Autodiff<Wgpu<f32, i32>>,
                 f32,
                 Vector<f32, VECTOR_CAP>,
-                20,
+                64,
                 VECTOR_CAP,
-                128,
+                64,
                 DB_THREADS,
             >(cmd_receiver);
         });
