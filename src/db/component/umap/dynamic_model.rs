@@ -7,7 +7,7 @@ use burn::{
     record::RecorderError,
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
     tensor::{backend::AutodiffBackend, Tensor, TensorData},
-    train::{RegressionOutput, TrainOutput, TrainStep, ValidStep},
+    train::{RegressionOutput, TrainOutput, TrainStep},
 };
 use rkyv::{to_bytes, Archive, Deserialize, Serialize};
 

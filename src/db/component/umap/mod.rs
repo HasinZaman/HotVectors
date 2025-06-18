@@ -16,8 +16,8 @@ use rand::seq::SliceRandom;
 
 use crate::vector::{Extremes, Field, VectorSpace};
 
-// pub mod incremental_model;
 pub mod dynamic_model;
+pub mod incremental_model;
 pub mod model;
 
 pub trait ParamUMap<B: Backend> {
@@ -496,7 +496,7 @@ pub struct UMapTrainingConfig {
 }
 
 pub fn train_umap<
-    B: Backend,
+    B: Backend + AutodiffBackend,
     ID: Copy + Clone + Hash + PartialEq + Eq + PartialOrd + Ord + Debug,
     M: Module<B>
         + for<'a> TrainStep<
@@ -526,20 +526,15 @@ pub fn train_umap<
         + Send
         + Sync
         + From<Vec<f32>>
-        + for<'a> From<&'a [f32; OUTPUT_DIM]>
+        // + for<'a> From<&'a [f32; OUTPUT_DIM]>
         + for<'a> From<&'a [f32]>,
-    const LAYERS: usize,
-    const INPUT_DIM: usize,
-    const HIDDEN_DIM: usize,
-    const OUTPUT_DIM: usize,
+    // const OUTPUT_DIM: usize,
 >(
     mut model: M,
     data: Vec<(ID, HD)>,
     config: UMapTrainingConfig,
 ) -> M
-where
-    B: AutodiffBackend,
-    // for<'a> &'a [f32]: Into<HD> + Into<LD>,
+    //where for<'a> &'a [f32]: Into<HD> + Into<LD>,
 {
     let device = B::Device::default();
 
