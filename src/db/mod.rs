@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use crate::vector::{Vector, VectorSerial};
+use crate::{db::component::partition::PartitionMembership, vector::{Vector, VectorSerial}};
 
 use burn::prelude::Backend;
 #[cfg(feature = "benchmark")]
@@ -90,6 +90,9 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
     },
     GetVectors {
         transaction_id: Option<Uuid>,
+
+        // TODO - replace partitions and GetClusters
+        // create enum to select from diffrent sources
     },
     GetMetaData {
         transaction_id: Option<Uuid>,
@@ -123,6 +126,7 @@ pub enum AtomicCmd<A: Field<A>, B: VectorSpace<A> + Sized> {
     },
     GetClusters {
         threshold: A,
+        // should only return meta data
     },
 }
 
@@ -287,6 +291,12 @@ where
     let meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<F, V>>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let cluster_sets: Arc<RwLock<Vec<ClusterSet<F>>>> = Arc::new(RwLock::new(Vec::new()));
+
+    let partition_membership: Arc<RwLock<PartitionMembership>> = Arc::new(
+        RwLock::new(
+            PartitionMembership::new(format!("data//{}//{}", PARTITION_DIR, "membership"))
+        )
+    );
 
     // check if file environment
     event!(Level::INFO, "FILE CHECK🗄️🗄️");
@@ -549,6 +559,7 @@ where
                             let inter_spanning_graph = inter_spanning_graph.clone();
 
                             let partition_buffer = partition_buffer.clone();
+                            let partition_membership = partition_membership.clone();
                             let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
 
                             let meta_data = meta_data.clone();
@@ -570,6 +581,7 @@ where
                                     transaction_id,
                                     meta_data,
                                     partition_buffer,
+                                    partition_membership,
                                     min_spanning_tree_buffer,
                                     inter_spanning_graph,
                                     cluster_sets,

@@ -167,7 +167,7 @@ impl<
             vectors: {
                 let mut tmp = value.vectors.iter().map(|x| x.map(|x| value.source[x]));
 
-                array::from_fn(move |_| tmp.next().unwrap())
+                Box::new(array::from_fn(move |_| tmp.next().unwrap()))
             },
             centroid: value.centroid,
             id: value.id,
@@ -856,7 +856,7 @@ pub fn split_partition<
     };
     // Note: new_partitions[0].id = target.id -> therefore should replace target after split_target call
     let mut result: [_; SPLITS] =
-        array::from_fn(|i1| (new_partitions[i1], intra_graphs[i1].clone()));
+        array::from_fn(|i1| (new_partitions[i1].clone(), intra_graphs[i1].clone()));
 
     let i1 = result.len() - 1;
     result.swap(0, i1);

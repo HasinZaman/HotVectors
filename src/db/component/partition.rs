@@ -2,9 +2,10 @@ use std::{array, hash::Hash, marker::PhantomData, ops::Index, str::FromStr};
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+use sled::Db;
 use uuid::Uuid;
 
-use crate::vector::{Extremes, Field, VectorSerial, VectorSpace};
+use crate::{db::component::ids::{PartitionId, VectorId}, vector::{Extremes, Field, VectorSerial, VectorSpace}};
 
 use super::serial::FileExtension;
 
@@ -16,7 +17,56 @@ pub enum PartitionErr {
     InsufficientSizeForSplits,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct PartitionMembership(String, pub Db);
+impl PartitionMembership {
+    pub fn new(dir: String) -> Self {
+        let db = sled::open(dir.clone()).expect("Failed to open sled DB");
+        Self(dir, db)
+    }
+
+    pub fn assign(&mut self, vec_id: VectorId, partition_id: PartitionId) {
+        let key = (*vec_id).as_bytes();          // &[u8; 16]
+        let value = (*partition_id).as_bytes();  // &[u8; 16]
+        self.1.insert(key, value).expect("DB insert failed");
+    }
+
+    pub fn get_partition_id(&self, vec_id: VectorId) -> Option<PartitionId> {
+        let key = (*vec_id).as_bytes();
+        self.1.get(key).ok().flatten().map(|ivec| {
+            let uuid = Uuid::from_slice(&ivec).expect("Invalid UUID in DB");
+            PartitionId(uuid)
+        })
+    }
+
+    #[inline]
+    pub fn update_membership<
+        A: PartialEq + Clone + Copy + Field<A>,
+        B: VectorSpace<A> + Sized + Clone + Copy,
+        const PARTITION_CAP: usize,
+        const VECTOR_CAP: usize,
+    >(&mut self, partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>) {
+        for VectorEntry{id, ..} in partition.iter() {
+            self.assign(
+                VectorId(*id),
+                PartitionId(partition.id)
+            );
+        }
+    }
+
+    pub fn flush(&mut self, flush_db: &PartitionMembership) {
+        for result in flush_db.1.iter() {
+            let (key, value) = result.expect("Error reading flush_db");
+
+            let vec_id = VectorId(Uuid::from_slice(&key).expect("Invalid UUID in key"));
+            let partition_id = PartitionId(Uuid::from_slice(&value).expect("Invalid UUID in value"));
+
+            self.assign(vec_id, partition_id);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Partition<
     A: PartialEq + Clone + Copy + Field<A>,
     B: VectorSpace<A> + Sized + Clone + Copy,
@@ -25,7 +75,7 @@ pub struct Partition<
 > {
     pub size: usize,
 
-    pub vectors: [Option<VectorEntry<A, B>>; PARTITION_CAP],
+    pub vectors: Box<[Option<VectorEntry<A, B>>; PARTITION_CAP]>,
     pub centroid: B,
 
     pub id: Uuid,
@@ -57,7 +107,7 @@ impl<
     {
         Partition {
             size: 0usize,
-            vectors: [None; PARTITION_CAP],
+            vectors: Box::new([None; PARTITION_CAP]),
             centroid: B::additive_identity(),
             id: Uuid::new_v4(),
         }
@@ -396,7 +446,7 @@ where
 
         Partition {
             size: value.vectors.len(),
-            vectors: array::from_fn(|_| iter.next()),
+            vectors: Box::new(array::from_fn(|_| iter.next())),
             centroid: value.centroid.into(),
             id: Uuid::from_str(&value.id).unwrap(),
         }
