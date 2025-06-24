@@ -14,6 +14,9 @@ use crate::{
     db::{
         banker::{AccessMode, AccessResponse, BankerMessage},
         component::{partition::PartitionMembership, umap::incremental_model::UMapStrategy},
+        operations::read::vector::{
+            get_vectors
+        },
     },
     resolve_buffer,
     vector::{Vector, VectorSerial},
@@ -37,10 +40,7 @@ use log::State;
 use operations::{
     add::{batch, single},
     cluster::build_clusters,
-    read::{
-        knn::stream_exact_knn, stream_inter_graph/*, stream_meta_data */, stream_partition_graph,
-        stream_vectors_from_partition,
-    },
+    read::{knn::stream_exact_knn, stream_inter_graph, stream_partition_graph},
 };
 use rancor::Strategy;
 use rkyv::{
@@ -277,7 +277,7 @@ pub fn db_loop<
         + Into<Vec<f32>>,
     LV: VectorSpace<f32> + Send + Sync + for<'a> From<&'a [f32]> + From<Vec<f32>> + Into<Vec<f32>>,
     K: Send + Sync + Clone + Debug + 'static + From<usize>,
-    // U: UMapStrategy<V, LV, Global, K, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>,
+    // U,
     // + HasPosition<Scalar = f32>,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
@@ -286,7 +286,7 @@ pub fn db_loop<
 >(
     // input channel
     mut cmd_input: Receiver<(Cmd<f32, V>, Sender<Response<f32>>)>,
-    // u_map_projections: U,
+    // u_map_projections: U
     // logger: Sender<State<AtomicCmd<A, B>>>,
     // log: Log<A, B, 5000>,
 ) -> !
@@ -729,284 +729,19 @@ where
                             source,
                             dim_projection,
                             projection_mode,
-                        } => {
-                            let (vector_tx, mut vector_rx) = mpsc::channel(64);
-                            let _vector_loader_thread = match source {
-                                Source::VectorId(vector_id) => {
-                                    let access_tx = access_tx.clone();
-                                    let partition_buffer = partition_buffer.clone();
-                                    let partition_membership = partition_membership.clone();
+                        } => get_vectors::<B, V, LV, K, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>(
+                            partition_buffer.clone(),
+                            cluster_sets.clone(),
+                            partition_membership.clone(),
+                            access_tx.clone(),
+                            
+                            transaction_id,
+                            source,
+                            dim_projection,
+                            projection_mode,
 
-                                    rt.spawn(async move {
-                                        let transaction_id =
-                                            transaction_id.unwrap_or_else(Uuid::new_v4);
-
-                                        let partition_id = loop {
-                                            let partition_membership =
-                                                &*partition_membership.read().await;
-
-                                            let partition_id: PartitionId = partition_membership
-                                                .get_partition_id(vector_id)
-                                                .unwrap();
-
-                                            let (tx, rx) = oneshot::channel();
-
-                                            let _ = access_tx
-                                                .send(BankerMessage::RequestAccess {
-                                                    transaction_id: transaction_id,
-                                                    partitions: vec![(
-                                                        partition_id,
-                                                        AccessMode::Read,
-                                                    )],
-                                                    respond_to: tx,
-                                                })
-                                                .await;
-
-                                            match rx.await {
-                                                Ok(AccessResponse::Granted) => break partition_id,
-                                                _ => {}
-                                            }
-                                        };
-
-                                        let partition_buffer = &mut *partition_buffer.write().await;
-                                        let partition =
-                                            resolve_buffer!(ACCESS, partition_buffer, partition_id);
-
-                                        let Some(partition) = &*partition.read().await else {
-                                            todo!()
-                                        };
-
-
-                                        for i in 0..partition.size {
-                                            let Some(vector_entry) = partition.vectors[i] else {
-                                                todo!()
-                                            };
-
-                                             if vector_id != VectorId(vector_entry.id) {
-                                                continue;
-                                            }
-
-                                            let _ = vector_tx.send(Some(vector_entry.clone())).await;
-
-                                            break;
-
-                                        }
-                                        let _ = vector_tx.send(None).await;
-                                    })
-                                }
-                                Source::PartitionId(partition_id) => {
-                                    let access_tx = access_tx.clone();
-                                    let partition_buffer = partition_buffer.clone();
-
-                                    rt.spawn(async move {
-                                        let transaction_id =
-                                            transaction_id.unwrap_or_else(Uuid::new_v4);
-
-                                        // Request access to the partition
-                                        let granted_partition = loop {
-                                            let (tx, rx) = oneshot::channel();
-
-                                            access_tx
-                                                .send(BankerMessage::RequestAccess {
-                                                    transaction_id,
-                                                    partitions: vec![(
-                                                        partition_id,
-                                                        AccessMode::Read,
-                                                    )],
-                                                    respond_to: tx,
-                                                })
-                                                .await
-                                                .expect("failed to send access request");
-
-                                            match rx.await {
-                                                Ok(AccessResponse::Granted) => break partition_id,
-                                                _ => {
-                                                    // Retry until access is granted
-                                                    // Optionally add delay or backoff
-                                                }
-                                            }
-                                        };
-
-                                        // Load the partition
-                                        let partition_buffer = &mut *partition_buffer.write().await;
-                                        let partition = resolve_buffer!(
-                                            ACCESS,
-                                            partition_buffer,
-                                            granted_partition
-                                        );
-
-                                        let Some(partition) = &*partition.read().await else {
-                                            todo!("Partition buffer resolve failed");
-                                        };
-
-                                        // Send all vectors in the partition
-                                        
-                                        for i in 0..partition.size {
-                                            let Some(vector_entry) = partition.vectors[i] else {
-                                                todo!()
-                                            };
-
-                                            let _ = vector_tx.send(Some(vector_entry.clone())).await;
-                                        }
-                                        let _ = vector_tx.send(None).await;
-                                    })
-                                }
-                                Source::ClusterId(cluster_id, threshold) => {
-                                    let cluster_sets = cluster_sets.clone();
-                                    let access_tx = access_tx.clone();
-                                    let partition_buffer = partition_buffer.clone();
-                                    let partition_membership = partition_membership.clone();
-
-                                    rt.spawn(async move {
-                                        let vectors = {
-                                            let cluster_sets = &*cluster_sets.read().await;
-
-                                            match cluster_sets.binary_search_by(|x| {
-                                                x.threshold
-                                                    .partial_cmp(&threshold)
-                                                    .unwrap_or(Ordering::Equal) // == Ordering::Equal
-                                            }) {
-                                                Ok(pos) => {
-                                                    let cluster_set = &cluster_sets[pos];
-
-                                                    cluster_set
-                                                        .get_cluster_members(cluster_id)
-                                                        .unwrap()
-                                                }
-                                                Err(_) => {
-                                                    // let _ = tx.send(Response::Fail).await;
-                                                    return;
-                                                }
-                                            }
-                                        };
-
-                                        let transaction_id = Uuid::new_v4();
-                                        let required_partitions: HashMap<
-                                            PartitionId,
-                                            HashSet<VectorId>,
-                                        > = loop {
-                                            let partition_membership =
-                                                &*partition_membership.read().await;
-
-                                            let mut partition_vectors_pairs: HashMap<
-                                                PartitionId,
-                                                HashSet<VectorId>,
-                                            > = HashMap::new();
-
-                                            for vector_id in &vectors {
-                                                let partition_id: PartitionId =
-                                                    partition_membership
-                                                        .get_partition_id(*vector_id)
-                                                        .unwrap();
-
-                                                partition_vectors_pairs
-                                                    .entry(partition_id)
-                                                    .or_default()
-                                                    .insert(*vector_id);
-                                            }
-
-                                            let (tx, rx) = oneshot::channel();
-
-                                            access_tx
-                                                .send(BankerMessage::RequestAccess {
-                                                    transaction_id: transaction_id,
-                                                    partitions: partition_vectors_pairs
-                                                        .keys()
-                                                        .map(|id| (*id, AccessMode::Read))
-                                                        .collect(),
-                                                    respond_to: tx,
-                                                })
-                                                .await;
-
-                                            match rx.await {
-                                                Ok(AccessResponse::Granted) => {
-                                                    break partition_vectors_pairs
-                                                }
-                                                _ => {}
-                                            }
-                                        };
-
-                                        for (partition_id, required_vectors) in
-                                            required_partitions.into_iter()
-                                        {
-                                            let partition_buffer =
-                                                &mut *partition_buffer.write().await;
-                                            let partition = resolve_buffer!(
-                                                ACCESS,
-                                                partition_buffer,
-                                                partition_id
-                                            );
-
-                                            let Some(partition) = &*partition.read().await else {
-                                                todo!()
-                                            };
-
-                                            for i in 0..partition.size {
-                                                let Some(vector_entry) = partition.vectors[i] else {
-                                                    todo!()
-                                                };
-
-                                                if !required_vectors
-                                                    .contains(&VectorId(vector_entry.id))
-                                                {
-                                                    continue;
-                                                }
-
-                                                let _ = vector_tx.send(Some(vector_entry.clone())).await;
-                                            }
-                                        }
-                                        
-                                        let _ = vector_tx.send(None).await;
-                                    })
-                                }
-                            };
-
-                            // project points if required
-                            let _vector_tx_thread = match dim_projection {
-                                Some(dim) => {
-                                    todo!()
-                                },
-                                None => {
-                                    rt.spawn(async move {
-                                        match projection_mode {
-                                            ProjectionMode::Default => {
-                                                while let Some(vector_entry) = vector_rx.recv().await.unwrap() {
-                                                    let _ = tx.send(Response::Success(
-                                                        Success::Vector(
-                                                            VectorId(vector_entry.id),
-                                                            VectorSerial::<f32>::from(vector_entry.vector),
-                                                        )
-                                                    )).await;
-                                                }
-                                            }
-                                            ProjectionMode::IdOnly => {
-                                                while let Some(vector_entry) = vector_rx.recv().await.unwrap() {
-
-                                                    let _ = tx.send(Response::Success(
-                                                        Success::Vector(
-                                                            VectorId(vector_entry.id),
-                                                            VectorSerial::<f32>::from(vector_entry.vector),
-                                                        )
-                                                    )).await;
-                                                }
-                                            },
-                                            ProjectionMode::VectorOnly => {
-                                                while let Some(vector_entry) = vector_rx.recv().await.unwrap() {
-
-                                                    let _ = tx.send(Response::Success(
-                                                        Success::Vector(
-                                                            VectorId(Uuid::nil()),
-                                                            VectorSerial::<f32>::from(vector_entry.vector),
-                                                        )
-                                                    )).await;
-                                                }
-                                            },
-                                        }
-                                        let _ = tx.send(Response::Done).await;
-                                    })
-                                }
-                            };
-                        }
+                            tx,
+                        ),
                         AtomicCmd::GetMetaData {
                             transaction_id,
                             source,
@@ -1318,47 +1053,6 @@ where
                                 notify_update.notify_waiters();
                             });
                         }
-                        // AtomicCmd::GetClusters { threshold } => {
-                        //     let cluster_sets = cluster_sets.clone();
-                        //
-                        //     rt.spawn(async move {
-                        //         let cluster_sets = &*cluster_sets.read().await;
-                        //         match cluster_sets.binary_search_by(|x| {
-                        //             x.threshold
-                        //                 .partial_cmp(&threshold)
-                        //                 .unwrap_or(Ordering::Equal) // == Ordering::Equal
-                        //         }) {
-                        //             Ok(pos) => {
-                        //                 let cluster_set = &cluster_sets[pos];
-                        //
-                        //                 for cluster_id in cluster_set.get_clusters() {
-                        //                     let _ = tx
-                        //                         .send(Response::Success(Success::Cluster(
-                        //                             cluster_id,
-                        //                         )))
-                        //                         .await;
-                        //                     let vector_ids = cluster_set
-                        //                         .get_cluster_members::<5>(cluster_id)
-                        //                         .unwrap();
-                        //
-                        //                     for vec_id in vector_ids {
-                        //                         let _ = tx
-                        //                             .send(Response::Success(Success::Vector(
-                        //                                 vec_id,
-                        //                                 VectorSerial(Vec::new()),
-                        //                             )))
-                        //                             .await;
-                        //                     }
-                        //                 }
-                        //
-                        //                 let _ = tx.send(Response::Done).await;
-                        //             }
-                        //             Err(_) => {
-                        //                 let _ = tx.send(Response::Fail).await;
-                        //             }
-                        //         }
-                        //     });
-                        // }
                     }
                 }
                 Cmd::Chained(chained_cmd) => {
