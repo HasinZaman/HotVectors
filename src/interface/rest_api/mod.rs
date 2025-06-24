@@ -21,19 +21,19 @@ use crate::{
     vector::{Field, Vector, VectorSerial, VectorSpace},
 };
 
-impl<A: PartialEq + Clone + Copy + From<f32>, const CAP: usize> TryFrom<Vec<f32>>
-    for Vector<A, CAP>
-{
-    type Error = ();
+// impl<A: PartialEq + Clone + Copy + From<f32>, const CAP: usize> TryFrom<Vec<f32>>
+//     for Vector<A, CAP>
+// {
+//     type Error = ();
 
-    fn try_from(value: Vec<f32>) -> Result<Self, Self::Error> {
-        if value.len() != CAP {
-            return Err(());
-        }
+//     fn try_from(value: Vec<f32>) -> Result<Self, Self::Error> {
+//         if value.len() != CAP {
+//             return Err(());
+//         }
 
-        Ok(Vector(array::from_fn(move |index| value[index].into())))
-    }
-}
+//         Ok(Vector(array::from_fn(move |index| value[index].into())))
+//     }
+// }
 
 pub mod cluster;
 pub mod graph;

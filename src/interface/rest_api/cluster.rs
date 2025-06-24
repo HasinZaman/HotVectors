@@ -56,49 +56,50 @@ async fn get_cluster<
     State(state): State<Arc<HotRequest<A, B>>>,
     Json(ClusterData { threshold }): Json<ClusterData>,
 ) -> Json<ClusterPayload> {
-    let (tx, mut rx) = channel(64);
-    let _ = state
-        .sender
-        .send((
-            Cmd::Atomic(AtomicCmd::GetClusters {
-                threshold: threshold.into(),
-            }),
-            tx,
-        ))
-        .await;
+    // let (tx, mut rx) = channel(64);
+    todo!();
+    // let _ = state
+    //     .sender
+    //     .send((
+    //         Cmd::Atomic(AtomicCmd::GetClusters {
+    //             threshold: threshold.into(),
+    //         }),
+    //         tx,
+    //     ))
+    //     .await;
 
-    let mut payload = ClusterPayload {
-        clusters: HashMap::new(),
-    };
+    // let mut payload = ClusterPayload {
+    //     clusters: HashMap::new(),
+    // };
 
-    let mut key = String::new();
+    // let mut key = String::new();
 
-    while let Some(data) = rx.recv().await {
-        match data {
-            Response::Success(Success::Cluster(cluster_id)) => {
-                key = cluster_id.0.into();
-                payload.clusters.insert(cluster_id.0.into(), Vec::new());
-            }
-            Response::Success(Success::Vector(vector_id, _)) => {
-                payload
-                    .clusters
-                    .get_mut(&key)
-                    .unwrap()
-                    .push(vector_id.0.into());
-            }
-            Response::Success(_) => {
-                panic!()
-            }
-            Response::Fail => {
-                todo!()
-            }
-            Response::Done => {
-                break;
-            }
-        }
-    }
+    // while let Some(data) = rx.recv().await {
+    //     match data {
+    //         Response::Success(Success::Cluster(cluster_id)) => {
+    //             key = cluster_id.0.into();
+    //             payload.clusters.insert(cluster_id.0.into(), Vec::new());
+    //         }
+    //         Response::Success(Success::Vector(vector_id, _)) => {
+    //             payload
+    //                 .clusters
+    //                 .get_mut(&key)
+    //                 .unwrap()
+    //                 .push(vector_id.0.into());
+    //         }
+    //         Response::Success(_) => {
+    //             panic!()
+    //         }
+    //         Response::Fail => {
+    //             todo!()
+    //         }
+    //         Response::Done => {
+    //             break;
+    //         }
+    //     }
+    // }
 
-    Json(payload)
+    // Json(payload)
 }
 
 pub(super) struct ClusterRoutes;

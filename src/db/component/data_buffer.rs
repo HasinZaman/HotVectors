@@ -849,9 +849,18 @@ where
     }
 
     for path in fs::read_dir(&source_buffer.source).unwrap() {
+        let path: PathBuf = path.unwrap().path();
+
+        let Some(extension) = path.extension() else {
+            continue;
+        };
+
+        if extension.to_str().unwrap() != B::extension() {
+            continue;
+        }
+
         // Construct paths
-        let id =
-            Uuid::from_str(path.unwrap().path().file_stem().unwrap().to_str().unwrap()).unwrap();
+        let id = Uuid::from_str(path.file_stem().unwrap().to_str().unwrap()).unwrap();
 
         let data = resolve_buffer!(ACCESS, source_buffer, PartitionId(id));
         let Some(data) = &mut *data.write().await else {

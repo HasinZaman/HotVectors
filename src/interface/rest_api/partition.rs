@@ -29,33 +29,35 @@ where
 {
     println!("META REQUEST");
 
-    let (tx, mut rx) = channel(64);
+    // let (tx, mut rx) = channel(64);
 
-    let _ = state
-        .sender
-        .send((
-            Cmd::Atomic(AtomicCmd::GetMetaData {
-                transaction_id: None,
-            }),
-            tx,
-        ))
-        .await;
+    todo!();
+    // let _ = state
+    //     .sender
+    //     .send((
+    //         Cmd::Atomic(AtomicCmd::GetMetaData {
+    //             transaction_id: None,
+    //         }),
+    //         tx,
+    //     ))
+    //     .await;
 
-    let mut data: Vec<(String, usize, Vec<f32>)> = Vec::new();
+    // let mut data: Vec<(String, usize, Vec<f32>)> = Vec::new();
 
-    while let Some(Response::Success(meta_data)) = rx.recv().await {
-        let Success::MetaData(id, size, vector_serial) = meta_data else {
-            panic!("")
-        };
+    // while let Some(Response::Success(meta_data)) = rx.recv().await {
+    //     todo!();
+    //     // let Success::PartitionMetaData(id, size, vector_serial) = meta_data else {
+    //     //     panic!("")
+    //     // };
 
-        data.push((
-            (*id).to_string(),
-            size,
-            vector_serial.0.into_iter().map(|x| f32::from(x)).collect(),
-        ));
-    }
+    //     // data.push((
+    //     //     (*id).to_string(),
+    //     //     size,
+    //     //     vector_serial.0.into_iter().map(|x| f32::from(x)).collect(),
+    //     // ));
+    // }
 
-    Json(format!("{:?}", data))
+    // Json(format!("{:?}", data))
 }
 
 pub(super) struct PartitionRoutes;

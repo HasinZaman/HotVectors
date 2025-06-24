@@ -4,14 +4,13 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, str::FromStr, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 use tokio::sync::mpsc::channel;
-use uuid::Uuid;
 
 use crate::{
-    db::{component::ids::PartitionId, AtomicCmd, Cmd, Response, Success},
+    db::{AtomicCmd, Cmd, Response, Success},
     interface::HotRequest,
-    vector::{Field, VectorSerial, VectorSpace},
+    vector::{Field, VectorSpace},
 };
 
 use super::{partition::RequestedPartitions, AddRoute};
@@ -38,43 +37,45 @@ where
 {
     println!("partition vector REQUEST");
 
-    let (tx, mut rx) = channel(64);
+    todo!();
 
-    let _ = state
-        .sender
-        .send((
-            Cmd::Atomic(AtomicCmd::Partitions {
-                ids: ids
-                    .into_iter()
-                    .map(|x| PartitionId(Uuid::from_str(&x).unwrap()))
-                    .collect(),
-            }),
-            tx,
-        ))
-        .await;
+    // let (tx, mut rx) = channel(64);
 
-    let mut json_data: Vec<(String, Vec<(String, Vec<f32>)>)> = Vec::new();
+    // let _ = state
+    //     .sender
+    //     .send((
+    //         Cmd::Atomic(AtomicCmd::Partitions {
+    //             ids: ids
+    //                 .into_iter()
+    //                 .map(|x| PartitionId(Uuid::from_str(&x).unwrap()))
+    //                 .collect(),
+    //         }),
+    //         tx,
+    //     ))
+    //     .await;
 
-    while let Some(Response::Success(data)) = rx.recv().await {
-        match data {
-            Success::Partition(partition_id) => {
-                json_data.push(((*partition_id).to_string(), Vec::new()));
-            }
-            Success::Vector(vector_id, VectorSerial(vector)) => {
-                json_data
-                    .last_mut()
-                    .expect("Must provide partition Id before streaming vectors")
-                    .1
-                    .push((
-                        (*vector_id).to_string(),
-                        vector.into_iter().map(|x| f32::from(x)).collect(),
-                    ));
-            }
-            _ => panic!(""),
-        };
-    }
+    // let mut json_data: Vec<(String, Vec<(String, Vec<f32>)>)> = Vec::new();
 
-    Json(FromPartitionPayload(json_data))
+    // while let Some(Response::Success(data)) = rx.recv().await {
+    //     match data {
+    //         Success::Partition(partition_id) => {
+    //             json_data.push(((*partition_id).to_string(), Vec::new()));
+    //         }
+    //         Success::Vector(vector_id, VectorSerial(vector)) => {
+    //             json_data
+    //                 .last_mut()
+    //                 .expect("Must provide partition Id before streaming vectors")
+    //                 .1
+    //                 .push((
+    //                     (*vector_id).to_string(),
+    //                     vector.into_iter().map(|x| f32::from(x)).collect(),
+    //                 ));
+    //         }
+    //         _ => panic!(""),
+    //     };
+    // }
+
+    // Json(FromPartitionPayload(json_data))
 }
 
 #[derive(Serialize, Deserialize)]

@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use burn::prelude::Backend;
 use petgraph::visit::EdgeRef;
-use spade::HasPosition;
 use tokio::sync::{mpsc::Sender, oneshot, RwLock};
 use tracing::{event, Level};
 use uuid::Uuid;
@@ -37,8 +37,8 @@ use crate::{
             ids::{PartitionId, VectorId},
             meta::Meta,
             partition::{
-                ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionSerial, VectorEntry,
-                VectorEntrySerial,
+                ArchivedVectorEntrySerial, Partition, PartitionErr, PartitionMembership,
+                PartitionSerial, VectorEntry, VectorEntrySerial,
             },
         },
         operations::{
@@ -52,18 +52,19 @@ use crate::{
         },
     },
     resolve_buffer,
-    vector::{Extremes, Field, VectorSerial, VectorSpace},
+    vector::{Extremes, Field, Vector, VectorSerial, VectorSpace},
 };
 
 use super::InterPartitionGraph;
 use crate::db::operations::add::get_neighbors;
 
 pub async fn add<
-    A: PartialEq
+    B: Backend,
+    F: PartialEq
         + PartialOrd
         + Clone
         + Copy
-        + Field<A>
+        + Field<F>
         + Archive
         + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rancor::Error>>
         + Debug
@@ -71,54 +72,49 @@ pub async fn add<
         + std::marker::Send
         + std::marker::Sync
         + 'static,
-    B: VectorSpace<A>
-        + Sized
-        + Clone
-        + Copy
-        + PartialEq
-        + Extremes
-        + From<VectorSerial<A>>
-        + Debug
-        + HasPosition<Scalar = f32>,
+    V: VectorSpace<F> + Sized + Clone + Copy + PartialEq + Extremes + From<VectorSerial<F>> + Debug,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
 >(
-    new_vector: VectorEntry<A, B>,
+    new_vector: VectorEntry<F, V>,
 
     transaction_id: Option<Uuid>,
 
-    meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>>>,
+    meta_data: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Meta<F, V>>>>>>,
     partition_buffer: Arc<
         RwLock<
             DataBuffer<
-                Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-                PartitionSerial<A>,
+                Partition<F, V, PARTITION_CAP, VECTOR_CAP>,
+                PartitionSerial<F>,
                 Global,
                 MAX_LOADED,
             >,
         >,
     >,
-    mst_buffer: Arc<RwLock<DataBuffer<IntraPartitionGraph<A>, GraphSerial<A>, Global, MAX_LOADED>>>,
+    mut partition_membership: Arc<RwLock<PartitionMembership>>,
+    mst_buffer: Arc<RwLock<DataBuffer<IntraPartitionGraph<F>, GraphSerial<F>, Global, MAX_LOADED>>>,
 
-    inter_graph: Arc<RwLock<InterPartitionGraph<A>>>,
-    cluster_sets: Arc<RwLock<Vec<ClusterSet<A>>>>,
+    inter_graph: Arc<RwLock<InterPartitionGraph<F>>>,
+    cluster_sets: Arc<RwLock<Vec<ClusterSet<F>>>>,
 
     access_tx: Sender<BankerMessage>,
 
     #[cfg(feature = "benchmark")] benchmark: Benchmark,
 ) -> Result<(), ()>
 where
-    VectorSerial<A>: From<B>,
-    for<'a> <A as Archive>::Archived:
+    VectorSerial<F>: From<V>,
+    for<'a> <F as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rancor::Error>>,
-    [ArchivedVectorEntrySerial<A>]:
-        DeserializeUnsized<[VectorEntrySerial<A>], Strategy<Pool, rancor::Error>>,
-    [<A as Archive>::Archived]: DeserializeUnsized<[A], Strategy<Pool, rancor::Error>>,
-    [ArchivedTuple3<u32_le, u32_le, <A as Archive>::Archived>]:
-        DeserializeUnsized<[(usize, usize, A)], Strategy<Pool, rancor::Error>>,
-    f32: From<A>,
-    <A as Archive>::Archived: rkyv::Deserialize<A, Strategy<Pool, rancor::Error>>,
+    [ArchivedVectorEntrySerial<F>]:
+        DeserializeUnsized<[VectorEntrySerial<F>], Strategy<Pool, rancor::Error>>,
+    [<F as Archive>::Archived]: DeserializeUnsized<[F], Strategy<Pool, rancor::Error>>,
+    [ArchivedTuple3<u32_le, u32_le, <F as Archive>::Archived>]:
+        DeserializeUnsized<[(usize, usize, F)], Strategy<Pool, rancor::Error>>,
+    f32: From<F>,
+    <F as Archive>::Archived: rkyv::Deserialize<F, Strategy<Pool, rancor::Error>>,
+    Vector<f32, VECTOR_CAP>: From<V>,
+    Vector<f32, 2>: From<V>,
 {
     let transaction_id = match transaction_id {
         Some(transaction_id) => transaction_id,
@@ -160,7 +156,7 @@ where
 
                 closet_size = *size;
 
-                (*id, B::dist(centroid, &new_vector.vector))
+                (*id, V::dist(centroid, &new_vector.vector))
             };
 
             for (_, data) in meta_data {
@@ -168,7 +164,7 @@ where
                     id, centroid, size, ..
                 } = &*data.read().await;
 
-                let dist = B::dist(centroid, &new_vector.vector);
+                let dist = V::dist(centroid, &new_vector.vector);
 
                 if dist < closest.1 {
                     closet_size = *size;
@@ -246,7 +242,7 @@ where
             let partition_buffer = &mut *w_partition_buffer;
 
             // getting neighbor ids
-            let neighbor_ids: Vec<PartitionId> = get_neighbors::<A, B, VECTOR_CAP>(
+            let neighbor_ids: Vec<PartitionId> = get_neighbors::<B, F, V, VECTOR_CAP>(
                 inter_graph,
                 closet_partition_id,
                 meta_data, // HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>
@@ -264,7 +260,7 @@ where
             //     required_ids.clone().into_iter().collect();
 
             let mut closet_id: Option<Uuid> = None;
-            let mut closet_dist: Option<A> = None;
+            let mut closet_dist: Option<F> = None;
 
             loop {
                 let mut acquired_partitions = Vec::new();
@@ -302,7 +298,7 @@ where
                 if partitions.len() > 0 {
                     for partition in &partitions {
                         for vector_entry in partition.iter() {
-                            let dist = B::dist(&new_vector.vector, &vector_entry.vector);
+                            let dist = V::dist(&new_vector.vector, &vector_entry.vector);
 
                             dist_map.insert(vector_entry.id, dist);
 
@@ -375,7 +371,7 @@ where
         // needs to be updated (Requires loading in more partitions in order to get distance of all nearby vectors)
         closet_partition_id = PartitionId(closet_vector_id);
 
-        let neighbor_ids: Vec<PartitionId> = get_neighbors::<A, B, VECTOR_CAP>(
+        let neighbor_ids: Vec<PartitionId> = get_neighbors::<B, F, V, VECTOR_CAP>(
             inter_graph,
             closet_partition_id,
             meta_data, // HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>
@@ -455,22 +451,23 @@ where
         mut local_meta_data,
         mut local_inter_graph,
         mut local_partition_buffer,
+        mut local_partition_membership,
         mut local_mst_buffer,
         // mut local_cluster_sets,
     ) = {
         let local_meta_data = {
-            let meta_data: &HashMap<Uuid, Arc<RwLock<Meta<A, B>>>> = &*meta_data.read().await;
+            let meta_data: &HashMap<Uuid, Arc<RwLock<Meta<F, V>>>> = &*meta_data.read().await;
             create_local_meta(&meta_data, &acquired_partitions).await
         };
 
         let local_inter_graph = {
-            let inter_graph: &InterPartitionGraph<A> = &*inter_graph.read().await;
+            let inter_graph: &InterPartitionGraph<F> = &*inter_graph.read().await;
             create_local_inter_graph(&acquired_partitions, &inter_graph)
         };
 
-        let local_partition_buffer: DataBuffer<
-            Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
-            PartitionSerial<A>,
+        let mut local_partition_buffer: DataBuffer<
+            Partition<F, V, PARTITION_CAP, VECTOR_CAP>,
+            PartitionSerial<F>,
             Local,
             MAX_LOADED,
         > = partition_buffer
@@ -479,9 +476,22 @@ where
             .copy_local(transaction_id, "partition", &write_partitions)
             .await;
 
+        let mut local_partition_membership: PartitionMembership = PartitionMembership::new(
+            format!("data//local//{}//partition//membership", transaction_id),
+        );
+        for partition_id in &write_partitions {
+            let partition = resolve_buffer!(ACCESS, local_partition_buffer, *partition_id);
+
+            let Some(partition) = &*partition.read().await else {
+                todo!();
+            };
+
+            local_partition_membership.update_membership(&partition);
+        }
+
         let local_mst_buffer: DataBuffer<
-            IntraPartitionGraph<A>,
-            GraphSerial<A>,
+            IntraPartitionGraph<F>,
+            GraphSerial<F>,
             Local,
             MAX_LOADED,
         > = mst_buffer
@@ -489,6 +499,7 @@ where
             .await
             .copy_local(transaction_id, "graph", &write_partitions)
             .await;
+
         // let local_cluster_sets = 'cluster_sets: {
         //     let cluster_sets = &*cluster_sets.read().await;
 
@@ -522,6 +533,7 @@ where
             local_meta_data,
             local_inter_graph,
             local_partition_buffer,
+            local_partition_membership,
             local_mst_buffer,
             // local_cluster_sets
         )
@@ -564,7 +576,7 @@ where
 
             event!(Level::DEBUG, "Beginning KMean split");
             let Ok(splits) =
-                split_partition::<A, B, KMean<MaxAttempt<128>>, PARTITION_CAP, VECTOR_CAP>(
+                split_partition::<F, V, KMean<MaxAttempt<128>>, PARTITION_CAP, VECTOR_CAP>(
                     partition,
                     mst,
                     &mut local_inter_graph,
@@ -576,7 +588,7 @@ where
 
             let mut new_closet_id = (
                 splits[0].0.id,
-                B::dist(&splits[0].0.centroid(), &new_vector.vector),
+                V::dist(&splits[0].0.centroid(), &new_vector.vector),
             );
             let mut push_pairs = Vec::new();
 
@@ -598,7 +610,7 @@ where
 
                 // if last value is closet_partition (then maybe skip that value and handle the edge case after the for loop)
                 for (new_partition, new_mst) in pairs {
-                    let dist = B::dist(&new_partition.centroid(), &new_vector.vector);
+                    let dist = V::dist(&new_partition.centroid(), &new_vector.vector);
 
                     if dist < new_closet_id.1 {
                         new_closet_id.0 = new_partition.id;
@@ -610,7 +622,7 @@ where
                         *partition = new_partition;
                         *mst = new_mst;
 
-                        let target_meta: &mut Meta<A, B> =
+                        let target_meta: &mut Meta<F, V> =
                             &mut *local_meta_data[&partition.id].write().await;
 
                         target_meta.size = partition.size;
@@ -619,11 +631,11 @@ where
                         target_meta.edge_length = (
                             match mst.smallest_edge() {
                                 Some(x) => x.2,
-                                None => A::max(),
+                                None => F::max(),
                             },
                             match mst.largest_edge() {
                                 Some(x) => x.2,
-                                None => A::min(),
+                                None => F::min(),
                             },
                         );
                     } else {
@@ -637,11 +649,11 @@ where
                                 (
                                     match new_mst.smallest_edge() {
                                         Some(x) => x.2,
-                                        None => A::max(),
+                                        None => F::max(),
                                     },
                                     match new_mst.largest_edge() {
                                         Some(x) => x.2,
-                                        None => A::min(),
+                                        None => F::min(),
                                     },
                                     // new_graph.smallest_edge().unwrap().2,
                                     // new_graph.largest_edge().unwrap().2,
@@ -655,6 +667,8 @@ where
             }
 
             for (new_partition, new_graph) in push_pairs {
+                local_partition_membership.update_membership(&new_partition);
+
                 resolve_buffer!(PUSH, local_partition_buffer, new_partition, [partition.id]);
                 resolve_buffer!(PUSH, local_mst_buffer, new_graph, [*mst.2]);
             }
@@ -670,6 +684,8 @@ where
 
         let _ = add_into_partition(new_vector.clone(), partition).unwrap();
 
+        local_partition_membership.assign(VectorId(new_vector.id), PartitionId(partition.id));
+
         let local_data = &mut *local_meta_data[&*closet_partition_id].write().await;
 
         local_data.size = partition.size;
@@ -679,14 +695,14 @@ where
     // update min_spanning
     println!("{:?} :- Update MST", new_vector.id);
     let (new_edges, deleted_edges): (
-        HashMap<(VectorId, VectorId), A>,
+        HashMap<(VectorId, VectorId), F>,
         HashSet<(VectorId, VectorId)>,
     ) = 'update_min_span: {
         #[cfg(feature = "benchmark")]
         let _child_benchmark =
             Benchmark::spawn_child("Update min-spanning tree".to_string(), &benchmark);
 
-        let mut new_edges: HashMap<(VectorId, VectorId), A> = HashMap::new();
+        let mut new_edges: HashMap<(VectorId, VectorId), F> = HashMap::new();
         let mut deleted_edges: HashSet<(VectorId, VectorId)> = HashSet::new();
         // filter out partitions where there is no overlap partition_max < vector_min
         // let mut neighbor_ids = HashSet::new();
@@ -695,7 +711,7 @@ where
             let _child_benchmark =
                 Benchmark::spawn_child("Find neighbors".to_string(), &_child_benchmark);
 
-            get_neighbors::<A, B, VECTOR_CAP>(
+            get_neighbors::<B, F, V, VECTOR_CAP>(
                 &local_inter_graph,
                 closet_partition_id,
                 &local_meta_data, // HashMap<Uuid, Arc<RwLock<Meta<A, B>>>>
@@ -714,7 +730,7 @@ where
 
         // update dist_map to include missing partitions
         // might not be required
-        let dist_map: HashMap<VectorId, A> = {
+        let dist_map: HashMap<VectorId, F> = {
             #[cfg(feature = "benchmark")]
             let _child_benchmark =
                 Benchmark::spawn_child("Generate distance map".to_string(), &_child_benchmark);
@@ -723,7 +739,7 @@ where
                 .into_iter()
                 .chain(neighbor_ids.clone())
                 .collect::<HashSet<_>>();
-            let mut dist_map: HashMap<VectorId, A> = cached_dist_map
+            let mut dist_map: HashMap<VectorId, F> = cached_dist_map
                 .into_iter()
                 .map(|(id, val)| (VectorId(id), val))
                 .collect();
@@ -768,7 +784,7 @@ where
                     // get get closet dist for each partition
                     for partition in &partitions {
                         for VectorEntry { id, vector, .. } in partition.iter() {
-                            dist_map.insert(VectorId(*id), B::dist(&new_vector.vector, vector));
+                            dist_map.insert(VectorId(*id), V::dist(&new_vector.vector, vector));
                         }
 
                         let id = PartitionId(partition.id);
@@ -836,7 +852,7 @@ where
 
         // println!("{:#?}", dist_map);
         if dist_map.len() == 0 {
-            let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<A>>>> =
+            let min_span_tree: Arc<RwLock<Option<IntraPartitionGraph<F>>>> =
                 resolve_buffer!(ACCESS, local_mst_buffer, closet_partition_id);
 
             let Some(min_span_tree) = &mut *min_span_tree.write().await else {
@@ -960,7 +976,7 @@ where
                 HashSet<(PartitionId, VectorId, VectorId)>,
             > = HashMap::new();
 
-            let mut hints_cache: HashMap<(PartitionId, VectorId), HashMap<VectorId, A>> =
+            let mut hints_cache: HashMap<(PartitionId, VectorId), HashMap<VectorId, F>> =
                 HashMap::new();
             let mut cached_partition_hints: HashMap<PartitionId, HashSet<(PartitionId, VectorId)>> =
                 HashMap::new();
@@ -1020,7 +1036,7 @@ where
                     };
 
                     let trails = {
-                        let mut trails: Vec<((PartitionId, VectorId), (PartitionId, VectorId), A)> = 'initialize_trail: {
+                        let mut trails: Vec<((PartitionId, VectorId), (PartitionId, VectorId), F)> = 'initialize_trail: {
                             let inter_edge = partition_trail[0];
 
                             if VectorId(new_vector.id) == inter_edge.0 .1 {
@@ -1295,7 +1311,7 @@ where
                             (
                                 (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
                                 (PartitionId(Uuid::nil()), VectorId(Uuid::nil())),
-                                A::min(),
+                                F::min(),
                             ),
                             |(acc_id_1, acc_id_2, acc_weight),
                              (next_id_1, next_id_2, next_weight)| {
@@ -1417,8 +1433,8 @@ where
 
                             let [pair_1, pair_2] =
                                 split_partition::<
-                                    A,
-                                    B,
+                                    F,
+                                    V,
                                     FirstTreeSplitStrategy,
                                     PARTITION_CAP,
                                     VECTOR_CAP,
@@ -1450,7 +1466,7 @@ where
                                 *partition = new_partition;
                                 *min_span_tree = new_min_span_tree;
 
-                                let target_meta: &mut Meta<A, B> =
+                                let target_meta: &mut Meta<F, V> =
                                     &mut *local_meta_data[&*split_partition_id].write().await;
 
                                 target_meta.size = partition.size;
@@ -1459,11 +1475,11 @@ where
                                 target_meta.edge_length = (
                                     match min_span_tree.smallest_edge() {
                                         Some(x) => x.2,
-                                        None => A::max(),
+                                        None => F::max(),
                                     },
                                     match min_span_tree.largest_edge() {
                                         Some(x) => x.2,
-                                        None => A::min(),
+                                        None => F::min(),
                                     },
                                 );
                             }
@@ -1494,15 +1510,17 @@ where
                                     (
                                         match new_min_span_tree.smallest_edge() {
                                             Some(x) => x.2,
-                                            None => A::max(),
+                                            None => F::max(),
                                         },
                                         match new_min_span_tree.largest_edge() {
                                             Some(x) => x.2,
-                                            None => A::min(),
+                                            None => F::min(),
                                         },
                                     ),
                                 ))),
                             );
+
+                            local_partition_membership.update_membership(&new_partition);
 
                             resolve_buffer!(
                                 PUSH,
@@ -1626,7 +1644,7 @@ where
 
                         match result {
                             Ok((new_partition, new_mst)) => {
-                                // println!("{new_partition:#?}");
+                                local_partition_membership.update_membership(&new_partition);
 
                                 *sink_partition = new_partition;
                                 *sink_mst = new_mst;
@@ -1667,6 +1685,9 @@ where
         {
             // flush partition buffer
             let partition_buffer = &mut *partition_buffer.write().await;
+
+            let partition_membership = &mut *partition_membership.write().await;
+            partition_membership.flush(&local_partition_membership);
 
             let _ = flush(local_partition_buffer, partition_buffer)
                 .await
