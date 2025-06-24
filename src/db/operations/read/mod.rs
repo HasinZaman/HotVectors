@@ -33,7 +33,7 @@ use crate::{
 };
 
 pub mod knn;
-// pub mod meta;
+pub mod meta;
 pub mod vector;
 
 pub async fn stream_partition_graph<
