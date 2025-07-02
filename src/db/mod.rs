@@ -1,29 +1,28 @@
 use std::{
-    cmp::{min, Ordering},
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    fs,
-    marker::PhantomData,
-    mem,
-    path::Path,
-    sync::Arc,
+    collections::HashMap, fmt::Debug, fs, marker::PhantomData, mem, path::Path, sync::Arc,
     time::Duration,
 };
 
 use crate::{
     db::{
-        banker::{AccessMode, AccessResponse, BankerMessage},
-        component::{partition::PartitionMembership, umap::incremental_model::UMapStrategy},
+        component::{
+            partition::PartitionMembership,
+            umap::{model_inference_loop, FuzzyNeighborGraph, ParamUMap, UMapBatch},
+        },
         operations::read::{
             meta::{stream_cluster_meta, stream_partition_meta},
             vector::get_vectors,
         },
     },
-    resolve_buffer,
     vector::{Vector, VectorSerial},
 };
 
-use burn::{prelude::Backend, tensor::backend::AutodiffBackend};
+use burn::{
+    module::{AutodiffModule, Module},
+    prelude::Backend,
+    tensor::backend::AutodiffBackend,
+    train::{RegressionOutput, TrainStep},
+};
 #[cfg(feature = "benchmark")]
 use component::benchmark::{benchmark_logger, Benchmark, BenchmarkId};
 
@@ -56,8 +55,9 @@ use spade::HasPosition;
 use tokio::{
     join, runtime,
     sync::{
+        broadcast,
         mpsc::{self, Receiver, Sender},
-        oneshot, Notify, RwLock,
+        oneshot, watch, Notify, RwLock,
     },
     time::sleep,
 };
@@ -275,19 +275,43 @@ pub fn db_loop<
         + 'static
         + Debug
         + From<Vec<f32>>
-        + Into<Vec<f32>>,
-    LV: VectorSpace<f32> + Send + Sync + for<'a> From<&'a [f32]> + From<Vec<f32>> + Into<Vec<f32>>,
-    K: Send + Sync + Clone + Debug + 'static + From<usize>,
-    // U,
-    // + HasPosition<Scalar = f32>,
+        + Into<Vec<f32>>
+        + for<'a> From<&'a [f32]>,
+    LV: VectorSpace<f32>
+        + Send
+        + Sync
+        + Clone
+        + Copy
+        + Extremes
+        + PartialEq
+        + 'static
+        + for<'a> From<&'a [f32]>
+        + Debug
+        + From<Vec<f32>>
+        + Into<Vec<f32>>
+        + From<VectorSerial<f32>>,
+    // K: Send + Sync + Clone + Debug + 'static + From<usize>,
+    U: ParamUMap<B>
+        + Module<B>
+        + for<'a> TrainStep<
+            (
+                UMapBatch<B, VectorId, V>,
+                &'a FuzzyNeighborGraph<f32, V, VectorId>,
+                (f32, f32),
+                PhantomData<(LV, V)>,
+            ),
+            RegressionOutput<B>,
+        > + AutodiffModule<B>
+        + Send,
     const PARTITION_CAP: usize,
     const VECTOR_CAP: usize,
     const MAX_LOADED: usize,
     const MAX_THREADS: usize,
+    const PROJECTIONS: usize,
+    const TRAINING_MAX: usize,
 >(
     // input channel
     mut cmd_input: Receiver<(Cmd<f32, V>, Sender<Response<f32>>)>,
-    // u_map_projections: U
     // logger: Sender<State<AtomicCmd<A, B>>>,
     // log: Log<A, B, 5000>,
 ) -> !
@@ -298,7 +322,7 @@ where
 
     // [ArchivedTuple3<u32_le, u32_le, <F as Archive>::Archived>]:
     //     DeserializeUnsized<[(usize, usize, F)], Strategy<Pool, rancor::Error>>,
-    VectorSerial<f32>: From<V>,
+    VectorSerial<f32>: From<V> + From<LV>,
     // <F as Archive>::Archived: Deserialize<F, Strategy<Pool, rancor::Error>>,
     // f32: From<F>,
     Vector<f32, VECTOR_CAP>: From<V>,
@@ -565,6 +589,16 @@ where
                 }
             });
         }
+
+        let (
+            (_training_thread, training_tx),
+            (_inference_thread, inference_tx),
+        ) = model_inference_loop::<B, U, V, LV, PROJECTIONS, PARTITION_CAP, VECTOR_CAP, MAX_LOADED, TRAINING_MAX>(
+            meta_data.clone(),
+            partition_buffer.clone(),
+            partition_membership.clone(),
+        );
+
         event!(Level::INFO, "I'M ALL HOT TO GO👠👠");
         loop {
             let (cmd, tx) = cmd_input.recv().await.unwrap();
@@ -605,10 +639,13 @@ where
                             let meta_data = meta_data.clone();
 
                             let cluster_sets = cluster_sets.clone();
+                            let training_tx = training_tx.clone();
 
                             let notify_update = notify_update.clone();
 
                             let access_tx = access_tx.clone();
+
+
 
                             #[cfg(feature = "benchmark")]
                             let benchmark_writer = benchmark_writer.clone();
@@ -617,7 +654,7 @@ where
                                 let value = VectorEntry::from_uuid(vector, id);
 
                                 match single::add::<B, f32, V, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>(
-                                    value,
+                                    value.clone(),
                                     transaction_id,
                                     meta_data,
                                     partition_buffer,
@@ -632,6 +669,7 @@ where
                                 .await
                                 {
                                     Ok(_) => {
+                                        let _  = training_tx.send(value).await;
                                         // log success
                                         // send success
                                     }
@@ -730,11 +768,12 @@ where
                             source,
                             dim_projection,
                             projection_mode,
-                        } => get_vectors::<B, V, LV, K, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>(
+                        } => get_vectors::<B, V, LV, PARTITION_CAP, VECTOR_CAP, MAX_LOADED>(
                             partition_buffer.clone(),
                             cluster_sets.clone(),
                             partition_membership.clone(),
                             access_tx.clone(),
+                            inference_tx.clone(),
                             
                             transaction_id,
                             source,

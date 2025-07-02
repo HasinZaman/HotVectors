@@ -1,9 +1,4 @@
-use std::{
-    cmp::min,
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use rancor::Strategy;
 use rkyv::{
@@ -21,11 +16,11 @@ use uuid::Uuid;
 use crate::{
     db::{
         component::{
-            data_buffer::{BufferError, DataBuffer, Global},
+            data_buffer::{DataBuffer, Global},
             graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
-            ids::{PartitionId, VectorId},
+            ids::PartitionId,
             meta::Meta,
-            partition::{ArchivedVectorEntrySerial, Partition, PartitionSerial, VectorEntrySerial},
+            partition::{ArchivedVectorEntrySerial, VectorEntrySerial},
         },
         Response, Success,
     },

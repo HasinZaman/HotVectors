@@ -1,4 +1,4 @@
-use std::{fmt::Debug, hash::Hash, marker::PhantomData};
+use std::{fmt::Debug, hash::Hash, marker::PhantomData, sync::Arc};
 
 use burn::{
     module::Module,
@@ -9,6 +9,7 @@ use burn::{
     tensor::{backend::AutodiffBackend, Tensor, TensorData},
     train::{RegressionOutput, TrainOutput, TrainStep, ValidStep},
 };
+use tokio::sync::RwLock;
 
 use crate::{
     db::component::umap::{FuzzyNeighborGraph, ParamUMap, UMapBatch},
@@ -27,15 +28,26 @@ pub struct Model<
     layers: [Linear<B>; LAYERS],
     activation: Relu,
 }
+// impl<
+//         B: Backend,
+//         const INPUT_DIM: usize,
+//         const LAYERS: usize,
+//         const HIDDEN_DIM: usize,
+//         const OUTPUT_DIM: usize,
+//     > Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM>
+// {
+
+// }
+
 impl<
         B: Backend,
         const INPUT_DIM: usize,
         const LAYERS: usize,
         const HIDDEN_DIM: usize,
         const OUTPUT_DIM: usize,
-    > Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM>
+    > ParamUMap<B> for Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM>
 {
-    pub fn new(device: &B::Device) -> Self {
+    fn new(device: &B::Device) -> Self {
         assert!(
             LAYERS >= 2,
             "At least 2 layers required: one hidden and one output"
@@ -62,16 +74,7 @@ impl<
             activation: Relu::new(),
         }
     }
-}
 
-impl<
-        B: Backend,
-        const INPUT_DIM: usize,
-        const LAYERS: usize,
-        const HIDDEN_DIM: usize,
-        const OUTPUT_DIM: usize,
-    > ParamUMap<B> for Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM>
-{
     fn forward_tensor(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
         let mut x = input;
         for (i, layer) in self.layers.iter().enumerate() {
@@ -114,13 +117,13 @@ impl<
         LD::from(output_flat)
     }
 
-    async fn save(&self, base_path: &str) -> Result<(), RecorderError> {
+    fn save(&self, base_path: &str) -> Result<(), RecorderError> {
         let recorder: NamedMpkFileRecorder<FullPrecisionSettings> =
             NamedMpkFileRecorder::<FullPrecisionSettings>::new();
         self.clone().save_file(base_path, &recorder)
     }
 
-    async fn load(device: &B::Device, base_path: &str) -> Result<Self, RecorderError> {
+    fn load(device: &B::Device, base_path: &str) -> Result<Self, RecorderError> {
         let recorder: NamedMpkFileRecorder<FullPrecisionSettings> =
             NamedMpkFileRecorder::<FullPrecisionSettings>::new();
         let mut model: Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM> = Self::new(device);
@@ -136,6 +139,19 @@ impl<
         OUTPUT_DIM
     }
 }
+
+// impl<
+//         B: Backend,
+//         const INPUT_DIM: usize,
+//         const LAYERS: usize,
+//         const HIDDEN_DIM: usize,
+//         const OUTPUT_DIM: usize,
+//     > Default for <Model<B, INPUT_DIM, LAYERS, HIDDEN_DIM, OUTPUT_DIM>>
+// {
+//     fn default() -> Self {
+//         Self { layers: Default::default(), activation: Default::default() }
+//     }
+// }
 
 impl<
         // 'a,
