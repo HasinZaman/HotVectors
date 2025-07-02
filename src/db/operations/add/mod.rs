@@ -5,7 +5,6 @@ use std::{
     sync::Arc,
 };
 
-use bincode::config;
 use burn::{backend::Autodiff, optim::AdamConfig, prelude::Backend};
 use spade::{DelaunayTriangulation, HasPosition, Triangulation};
 use tokio::sync::RwLock;
@@ -199,7 +198,7 @@ where
         };
 
         let device = <Autodiff<B> as Backend>::Device::default();
-        let mut model = Model::<Autodiff<B>, { VECTOR_CAP }, 3, 16, 2>::new(&device);
+        let model = Model::<Autodiff<B>, { VECTOR_CAP }, 3, 16, 2>::new(&device);
 
         let model = train_umap::<
             Autodiff<B>,
@@ -207,14 +206,9 @@ where
             Model<Autodiff<B>, { VECTOR_CAP }, 3, 16, 2>,
             Vector<f32, VECTOR_CAP>,
             Vector<f32, 2>,
-            3,
-            VECTOR_CAP,
-            16,
-            2,
-        >(model, data.clone(), config);
+        >(model, data.clone(), &config);
 
-        let points = data
-            .iter()
+        data.iter()
             .map(|(partition_id, original_vec)| {
                 let projected: Vector<f32, 2> = model.forward(*original_vec);
                 DelaunayVertex {
@@ -224,7 +218,7 @@ where
                 }
             })
             .for_each(|point| {
-                triangulation.insert(point);
+                let _ = triangulation.insert(point).unwrap();
             });
     } else {
         for (id, meta) in meta_data {
