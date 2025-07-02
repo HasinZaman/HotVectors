@@ -91,10 +91,7 @@ pub async fn benchmark_logger(receiver: Receiver<(BenchmarkId, u64, u64, String)
             Err(e) => panic!("Failed to create CSV file: {}", e),
         };
 
-        if let Err(e) = file
-            .write_all(b"id,parent_id,start,end,message\n")
-            .await
-        {
+        if let Err(e) = file.write_all(b"id,parent_id,start,end,message\n").await {
             panic!("Failed to write CSV header: {}", e);
         }
     }
@@ -115,11 +112,7 @@ pub async fn benchmark_logger(receiver: Receiver<(BenchmarkId, u64, u64, String)
         };
 
         // Open file in append mode for writing
-        let mut file = match OpenOptions::new()
-            .append(true)
-            .open(&csv_path)
-            .await
-        {
+        let mut file = match OpenOptions::new().append(true).open(&csv_path).await {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to open CSV file: {}", e);
