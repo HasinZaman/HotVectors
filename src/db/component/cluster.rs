@@ -21,6 +21,7 @@ use super::{
     serial::FileExtension,
 };
 
+#[derive(Debug)]
 struct ClusterMembership {
     cluster_to_vector: Db,
     vector_to_cluster: Db,
@@ -67,12 +68,15 @@ impl ClusterMembership {
         // update vtc
         {
             for vector_id in &absorbed_cluster {
-                self.vector_to_cluster.insert(
-                    vector_id.as_ref(),
-                    to_bytes::<rancor::Error>(merge_cluster_id)
-                        .unwrap()
-                        .as_ref(),
-                );
+                let _ = self
+                    .vector_to_cluster
+                    .insert(
+                        vector_id.as_ref(),
+                        to_bytes::<rancor::Error>(merge_cluster_id)
+                            .unwrap()
+                            .as_ref(),
+                    )
+                    .unwrap();
             }
         }
 
@@ -80,14 +84,20 @@ impl ClusterMembership {
         {
             let merged_vectors: Vec<VectorId> =
                 merge_cluster.union(&absorbed_cluster).cloned().collect();
-            self.cluster_to_vector.insert(
-                merge_cluster_id.as_ref(),
-                to_bytes::<rancor::Error>(&merged_vectors).unwrap().as_ref(),
-            );
+            let _ = self
+                .cluster_to_vector
+                .insert(
+                    merge_cluster_id.as_ref(),
+                    to_bytes::<rancor::Error>(&merged_vectors).unwrap().as_ref(),
+                )
+                .unwrap();
         }
         // delete
         {
-            self.cluster_to_vector.remove(absorbed_cluster_id.as_ref());
+            let _ = self
+                .cluster_to_vector
+                .remove(absorbed_cluster_id.as_ref())
+                .unwrap();
         }
         Ok(())
     }
@@ -99,7 +109,7 @@ struct ClusterMeta {
     merged_into: Option<ClusterId>,
 }
 
-#[derive()]
+#[derive(Debug)]
 pub struct ClusterSet<A: Field<A> + Debug + Clone> {
     pub threshold: A,
     pub id: Uuid,
@@ -352,10 +362,12 @@ where
             merged_into: None,
         };
 
-        self.meta.insert(
-            cluster_id.as_ref(),
-            to_bytes::<rancor::Error>(&meta).unwrap().as_ref(),
-        ).unwrap();
+        self.meta
+            .insert(
+                cluster_id.as_ref(),
+                to_bytes::<rancor::Error>(&meta).unwrap().as_ref(),
+            )
+            .unwrap();
 
         let vec: Vec<VectorId> = Vec::new();
 
@@ -381,17 +393,24 @@ where
             let mut meta = from_bytes::<ClusterMeta, rancor::Error>(bytes.as_ref()).unwrap();
             meta.size += 1;
 
-            let _ = self.meta.insert(
-                cluster_id.as_ref(),
-                to_bytes::<rancor::Error>(&meta).unwrap().as_ref(),
-            ).unwrap();
+            let _ = self
+                .meta
+                .insert(
+                    cluster_id.as_ref(),
+                    to_bytes::<rancor::Error>(&meta).unwrap().as_ref(),
+                )
+                .unwrap();
         }
         // update membership
         {
-            let _ = self.membership.vector_to_cluster.insert(
-                vector_id.as_ref(),
-                to_bytes::<rancor::Error>(&cluster_id).unwrap().as_ref(),
-            ).unwrap();
+            let _ = self
+                .membership
+                .vector_to_cluster
+                .insert(
+                    vector_id.as_ref(),
+                    to_bytes::<rancor::Error>(&cluster_id).unwrap().as_ref(),
+                )
+                .unwrap();
 
             let bytes = self
                 .membership
@@ -412,10 +431,14 @@ where
                 }
             };
 
-            let _ = self.membership.cluster_to_vector.insert(
-                cluster_id.as_ref(),
-                to_bytes::<rancor::Error>(&vectors).unwrap().as_ref(),
-            ).unwrap();
+            let _ = self
+                .membership
+                .cluster_to_vector
+                .insert(
+                    cluster_id.as_ref(),
+                    to_bytes::<rancor::Error>(&vectors).unwrap().as_ref(),
+                )
+                .unwrap();
         }
 
         Ok(())
@@ -523,8 +546,10 @@ where
         }
 
         // update membership
-        let _ = self.membership
-            .merge_clusters(&merge_cluster_id, &absorbed_cluster_id).unwrap();
+        let _ = self
+            .membership
+            .merge_clusters(&merge_cluster_id, &absorbed_cluster_id)
+            .unwrap();
 
         Ok(())
     }
@@ -555,10 +580,7 @@ where
         Ok(from_bytes::<ClusterId, rancor::Error>(bytes.as_ref()).unwrap())
     }
 
-    pub fn get_cluster_members<const MAX_ATTEMPTS: usize>(
-        &self,
-        cluster_id: ClusterId,
-    ) -> Result<Vec<VectorId>, ()> {
+    pub fn get_cluster_members(&self, cluster_id: ClusterId) -> Result<Vec<VectorId>, ()> {
         let bytes = self
             .membership
             .cluster_to_vector

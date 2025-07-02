@@ -564,9 +564,9 @@ async fn get_meta_data<
                             ClusterId(
                                 uuid.map(|id| Uuid::from_str(&id).ok())
                                     .flatten()
-                                    .unwrap_or(Uuid::nil())
+                                    .unwrap_or(Uuid::nil()),
                             ),
-                            threshold
+                            threshold,
                         ),
                         dim_projection: None,
                     }),
@@ -651,7 +651,7 @@ async fn get_meta_data<
                         }
                         state => {
                             panic!("{state:?} is an invalid state");
-                        },
+                        }
                     },
                     Response::Fail => todo!(),
                 }

@@ -5,7 +5,10 @@ use rkyv::{Archive, Deserialize, Serialize};
 use sled::Db;
 use uuid::Uuid;
 
-use crate::{db::component::ids::{PartitionId, VectorId}, vector::{Extremes, Field, VectorSerial, VectorSpace}};
+use crate::{
+    db::component::ids::{PartitionId, VectorId},
+    vector::{Extremes, Field, VectorSerial, VectorSpace},
+};
 
 use super::serial::FileExtension;
 
@@ -26,8 +29,8 @@ impl PartitionMembership {
     }
 
     pub fn assign(&mut self, vec_id: VectorId, partition_id: PartitionId) {
-        let key = (*vec_id).as_bytes();          // &[u8; 16]
-        let value = (*partition_id).as_bytes();  // &[u8; 16]
+        let key = (*vec_id).as_bytes(); // &[u8; 16]
+        let value = (*partition_id).as_bytes(); // &[u8; 16]
         self.1.insert(key, value).expect("DB insert failed");
     }
 
@@ -45,12 +48,12 @@ impl PartitionMembership {
         B: VectorSpace<A> + Sized + Clone + Copy,
         const PARTITION_CAP: usize,
         const VECTOR_CAP: usize,
-    >(&mut self, partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>) {
-        for VectorEntry{id, ..} in partition.iter() {
-            self.assign(
-                VectorId(*id),
-                PartitionId(partition.id)
-            );
+    >(
+        &mut self,
+        partition: &Partition<A, B, PARTITION_CAP, VECTOR_CAP>,
+    ) {
+        for VectorEntry { id, .. } in partition.iter() {
+            self.assign(VectorId(*id), PartitionId(partition.id));
         }
     }
 
@@ -59,7 +62,8 @@ impl PartitionMembership {
             let (key, value) = result.expect("Error reading flush_db");
 
             let vec_id = VectorId(Uuid::from_slice(&key).expect("Invalid UUID in key"));
-            let partition_id = PartitionId(Uuid::from_slice(&value).expect("Invalid UUID in value"));
+            let partition_id =
+                PartitionId(Uuid::from_slice(&value).expect("Invalid UUID in value"));
 
             self.assign(vec_id, partition_id);
         }
