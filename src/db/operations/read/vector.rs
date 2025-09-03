@@ -256,25 +256,40 @@ pub async fn stream_vectors_from_cluster<
         }
     };
     for (partition_id, required_vectors) in required_partitions.into_iter() {
-        let partition_buffer = &mut *partition_buffer.write().await;
-        let partition = resolve_buffer!(ACCESS, partition_buffer, partition_id);
+        {
+            let partition_buffer = &mut *partition_buffer.write().await;
+            let partition = resolve_buffer!(ACCESS, partition_buffer, partition_id);
 
-        let Some(partition) = &*partition.read().await else {
-            todo!()
-        };
-
-        for i in 0..partition.size {
-            let Some(vector_entry) = partition.vectors[i] else {
+            let Some(partition) = &*partition.read().await else {
                 todo!()
             };
 
-            if !required_vectors.contains(&VectorId(vector_entry.id)) {
-                continue;
-            }
+            for i in 0..partition.size {
+                let Some(vector_entry) = partition.vectors[i] else {
+                    todo!()
+                };
 
-            let _ = vector_tx.send(Some(vector_entry.clone())).await;
+                if !required_vectors.contains(&VectorId(vector_entry.id)) {
+                    continue;
+                }
+
+                let _ = vector_tx.send(Some(vector_entry.clone())).await;
+            }
         }
+
+        
+        // TODO - drop partition before releasing?
+        let _ = access_tx
+            .send(
+                BankerMessage::ReleaseAccess{
+                    transaction_id: transaction_id,
+                    partitions: vec![partition_id]
+            })
+            .await;
+
     }
+
+
     let _ = vector_tx.send(None).await;
 }
 
@@ -367,6 +382,16 @@ pub async fn stream_vectors_from_partition<
 
         let _ = vector_tx.send(Some(vector_entry.clone())).await;
     }
+    
+    // TODO - drop partition before releasing?
+    let _ = access_tx
+        .send(
+            BankerMessage::ReleaseAccess{
+                transaction_id: transaction_id,
+                partitions: vec![partition_id]
+        })
+        .await;
+
     let _ = vector_tx.send(None).await;
 }
 
@@ -462,6 +487,17 @@ pub async fn stream_vector_by_id<
 
         break;
     }
+    
+    // TODO - drop partition before releasing?
+    let _ = access_tx
+        .send(
+            BankerMessage::ReleaseAccess{
+                transaction_id: transaction_id,
+                partitions: vec![partition_id]
+        })
+        .await;
+
+
     let _ = vector_tx.send(None).await;
 }
 
