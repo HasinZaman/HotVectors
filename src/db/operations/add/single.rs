@@ -271,6 +271,10 @@ where
                 for id in required_partitions.iter() {
                     // Replace with try access and/or batch access
                     let Ok(partition) = partition_buffer.access(*id).await else {
+                        event!(
+                            Level::DEBUG,
+                            "Failed to acquire {id:?}"
+                        );
                         continue;
                     };
 
@@ -424,8 +428,17 @@ where
                 )
             }
             _ => {
+                event!(
+                    Level::DEBUG,
+                    "{:?} :- Access denied for {:?}",
+                    new_vector.id,
+                    read_partitions
+                        .clone()
+                        .into_iter()
+                        .chain(write_partitions.clone().into_iter())
+                        .collect::<HashSet<_>>()
+                );
                 // println!(
-                //     "{:?} :- Access denied for {:?}",
                 //     new_vector.id,
                 //     read_partitions
                 //         .clone()
