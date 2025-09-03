@@ -39,7 +39,9 @@ spade = { version = "2.13.1", features = ["serde"]}
 bincode = { version = "2.0.0-rc.3"}
 bincode_derive = { version = "2.0.0-rc.3"}
 # fast-umap = "0.0.2"
-burn = {version = "~0.17.0", features = ["train", "wgpu"]}
+burn = {version = "~0.17.0", features = ["train", "vulkan", "tch"]}
+burn-cuda = "~0.17.0"
+# burn-tch = "0.17.1"
 # burn-wgpu = "0.17"
 
 # Conditional dependency for REST API
