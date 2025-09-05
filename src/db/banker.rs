@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc::Receiver, oneshot};
+use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::component::ids::PartitionId;
@@ -18,12 +19,6 @@ pub enum AccessResponse {
 
 pub type TransactionId = Uuid;
 
-#[derive(Debug)]
-pub struct AccessRequest {
-    pub transaction_id: TransactionId,
-    pub partitions: Vec<(PartitionId, AccessMode)>,
-    pub respond_to: oneshot::Sender<AccessResponse>,
-}
 #[derive(Debug)]
 pub enum BankerMessage {
     RequestAccess {
@@ -81,7 +76,14 @@ impl PartitionState {
 pub async fn banker(mut rx: Receiver<BankerMessage>) {
     let mut partition_map: HashMap<PartitionId, PartitionState> = HashMap::new();
 
+
     while let Some(msg) = rx.recv().await {
+            
+        event!(
+            Level::DEBUG,
+            "Bank {partition_map:?}",
+        );
+
         match msg {
             BankerMessage::RequestAccess {
                 transaction_id,
