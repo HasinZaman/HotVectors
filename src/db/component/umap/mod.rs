@@ -175,9 +175,9 @@ where
                 };
 
                 if let Some(idx) = train_idx {
-                    println!("TRAINING");
+                    println!("TRAINING - forced");
                     // create dataset/batches
-                    let batches = partition_batches::<HD, MAX_CAP>(
+                    let batches: Vec<Vec<PartitionId>> = partition_batches::<HD, MAX_CAP>(
                         buffer
                             .iter()
                             .map(|vector_entry| VectorId(vector_entry.id))
@@ -193,8 +193,10 @@ where
                         false => 3,
                         true => 1,
                     };
-                    for _ in 0..epochs {
+                    for _i in 0..epochs {
+                        println!("Epoch {_i:}");
                         for batch in &batches {
+                            println!("batch {batch:?}");
                             // load data
                             let training_data = {
                                 let mut training_data = Vec::new();
@@ -226,6 +228,7 @@ where
 
                     models_trained[idx] = true;
 
+                    println!("Trying to save");
                     let model_path = format!("model");
                     if let Err(e) = model.save(&model_path) {
                         eprintln!("[{idx}] Save failed: {e:?}");
@@ -237,8 +240,8 @@ where
                     let batch_size = &mut *batch_size.lock().await;
                     *batch_size = 0;
                 } else if buffer.len() > 64 {
-                    println!("TRAINING");
-                    let batches = partition_batches::<HD, MAX_CAP>(
+                    println!("TRAINING - buffer overflow");
+                    let batches: Vec<Vec<PartitionId>> = partition_batches::<HD, MAX_CAP>(
                         buffer
                             .iter()
                             .map(|vector_entry| VectorId(vector_entry.id))
@@ -254,9 +257,11 @@ where
                             false => 3,
                             true => 1,
                         };
-                        for _ in 0..epochs {
+                        for _i in 0..epochs {
+                            println!("Epoch {_i:}");
                             // create dataset/batches
                             for batch in &batches {
+                                println!("batch {batch:?}");
                                 // load data
                                 let training_data = {
                                     let mut training_data = Vec::new();
@@ -295,6 +300,7 @@ where
                         }
 
                         models_trained[i] = true;
+                        println!("Trying to save");
                         let model_path = format!("model");
                         if let Err(e) = model.save(&model_path) {
                             eprintln!("[{i}] Save failed: {e:?}");
@@ -463,24 +469,118 @@ pub async fn partition_batches<HD: VectorSpace<f32> + Clone, const MAX_BATCH: us
         }
     }
 
+    // check if size is smaller the MAX_BATCH -> then return batch
+    let total_size: usize = partition_sizes.iter().map(|(_,x)| *x).sum();
+    if required_partitions.len() == meta_data.len() && total_size < MAX_BATCH{
+        println!("Base case 1");
+        return vec![required_partitions.into_iter().collect()]
+    }
+
+    if required_partitions.len() < meta_data.len() && total_size < MAX_BATCH {
+        println!("Base case 2");
+        let available: Vec<PartitionId> = {
+            let mut rng = rng();
+
+            let mut available: Vec<PartitionId> = meta_data
+                .keys()
+                .filter(|partition_id| !required_partitions.contains(&PartitionId(**partition_id)))
+                .map(|partition_id| PartitionId(*partition_id))
+                .collect();
+            
+            available.shuffle(&mut rng);
+
+            available
+            
+        };
+
+        let mut batch: Vec<PartitionId> = required_partitions.iter().cloned().collect();
+        let mut current_size = total_size;
+        for partition_id in available {
+            let mut size = partition_sizes.get(&partition_id).cloned();
+
+            if size.is_none() {
+                if let Some(meta) = meta_data.get(&partition_id) {
+                    let meta = meta.read().await;
+                    size = Some(meta.size);
+                }
+            }
+
+            if let Some(size) = size {
+                if current_size + size <= MAX_BATCH {
+                    batch.push(partition_id);
+                    current_size += size;
+                }
+            }
+
+            if current_size >= MAX_BATCH {
+                break;
+            }
+        }
+
+        return vec![batch];
+    }
+
+    if required_partitions.len() < meta_data.len() {
+        let add_count = (required_partitions.len() + 3) / 4;
+
+        let available: Vec<PartitionId> = {
+            let mut rng = rng();
+
+            let mut available: Vec<PartitionId> = meta_data
+                .keys()
+                .filter(|pid| !required_partitions.contains(&PartitionId(**pid)))
+                .map(|pid| PartitionId(*pid))
+                .collect();
+
+            available.shuffle(&mut rng);
+
+            available
+        };
+
+        for pid in available.into_iter().take(add_count) {
+            required_partitions.insert(pid);
+
+            // also fetch and cache its size if not already in partition_sizes
+            if !partition_sizes.contains_key(&pid) {
+                if let Some(meta) = meta_data.get(&pid) {
+                    let meta = meta.read().await;
+                    partition_sizes.insert(pid, meta.size);
+                }
+            }
+        }
+
+        println!(
+            "Added {add_count} random partitions to improve training quality (now {} required)",
+            required_partitions.len()
+        );
+    }
+    
     // Initialize usage count: how many batches each partition has been in
     let mut usage_counts: HashMap<PartitionId, usize> =
-        required_partitions.iter().map(|&pid| (pid, 0)).collect();
+        required_partitions.iter()
+            .map(|&partition_id| (partition_id, 0))
+            .collect();
 
     let mut batches = Vec::new();
 
-    // While we still want to create batches...
+
+    println!("Attempting to generate partitions for batches");
     while !required_partitions.is_empty() {
+        // println!("batches:{batches:?}");
+        // println!("required_partitions:{required_partitions:?}");
+
         let mut batch = Vec::new();
         let mut current_size = 0;
 
         // Group partitions by usage count
         let mut usage_buckets: HashMap<usize, Vec<PartitionId>> = HashMap::new();
-        for &pid in &required_partitions {
-            let count = usage_counts.get(&pid).cloned().unwrap_or(0);
-            usage_buckets.entry(count).or_default().push(pid);
+        for &partition_id in &required_partitions {
+            let count = usage_counts.get(&partition_id).cloned().unwrap_or(0);
+            usage_buckets.entry(count).or_default().push(partition_id);
         }
 
+
+        // println!("usage_buckets: {usage_buckets:?}");
         // Sort usage levels and shuffle within groups
         let mut sorted_partitions = Vec::new();
         let mut thread_rng = rng();
@@ -493,13 +593,17 @@ pub async fn partition_batches<HD: VectorSpace<f32> + Clone, const MAX_BATCH: us
             sorted_partitions.extend(group);
         }
 
+        // println!("sorted_partitions: {sorted_partitions:?}");
+        // println!("current_size: {current_size:?}");
+
         // Fill the batch with shuffled, least-used partitions
-        for pid in sorted_partitions {
-            let size = *partition_sizes.get(&pid).unwrap_or(&0);
+        for partition_id in sorted_partitions {
+            let size = *partition_sizes.get(&partition_id).unwrap_or(&0);
+            // println!("size: {current_size} + {size} ({}) <= {MAX_BATCH}", current_size + size);
             if current_size + size <= MAX_BATCH {
-                batch.push(pid);
+                batch.push(partition_id);
                 current_size += size;
-                *usage_counts.entry(pid).or_default() += 1;
+                *usage_counts.entry(partition_id).or_default() += 1;
             }
             if current_size >= MAX_BATCH {
                 break;
@@ -512,6 +616,8 @@ pub async fn partition_batches<HD: VectorSpace<f32> + Clone, const MAX_BATCH: us
         for pid in &batch {
             let max_usage = *usage_counts.values().max().unwrap_or(&1);
             let min_usage = *usage_counts.values().min().unwrap_or(&0);
+            
+            println!("{pid:?}:{max_usage:} - {min_usage:} <= 1");
             if max_usage - min_usage <= 1 {
                 required_partitions.remove(pid);
             }
@@ -565,7 +671,7 @@ where
 {
     pub fn higher_dim<const K: usize>(points: &Vec<(ID, B)>) -> Self {
         // get similarity matrix
-        println!("Calculating similarity matrix... {:?}", points.len());
+        // println!("Calculating similarity matrix... {:?}", points.len());
         let similarity_matrix = {
             // shit code can be improved
             let mut similarity_matrix: Vec<f32> = Vec::with_capacity(points.len() * points.len());
