@@ -2,13 +2,7 @@ use std::{cmp::Ordering, collections::HashSet, fmt::Debug, str::FromStr};
 
 use rancor::Strategy;
 use rkyv::{
-    bytecheck::CheckBytes,
-    from_bytes,
-    ser::{allocator::ArenaHandle, sharing::Share, Serializer},
-    to_bytes,
-    util::AlignedVec,
-    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
-    Archive, Deserialize, Serialize,
+    bytecheck::CheckBytes, from_bytes, from_bytes_unchecked, ser::{allocator::ArenaHandle, sharing::Share, Serializer}, to_bytes, util::AlignedVec, validation::{archive::ArchiveValidator, shared::SharedValidator, Validator}, Archive, Deserialize, Serialize
 };
 use sled::Db;
 use tokio::fs::read_dir;
@@ -20,6 +14,10 @@ use super::{
     ids::{ClusterId, VectorId},
     serial::FileExtension,
 };
+
+pub enum MergeClusterError{
+    SameCluster
+}
 
 #[derive(Debug)]
 struct ClusterMembership {
@@ -38,14 +36,14 @@ impl ClusterMembership {
 
     pub fn merge_clusters(
         &mut self,
-        merge_cluster_id: &ClusterId,
-        absorbed_cluster_id: &ClusterId,
+        absorbing_cluster_id: &ClusterId,
+        merging_cluster_id: &ClusterId,
     ) -> Result<(), sled::Error> {
-        let merge_cluster: HashSet<VectorId> = {
+        let absorbing_cluster: HashSet<VectorId> = {
             let bytes = self
                 .cluster_to_vector
-                .get(merge_cluster_id.as_ref())?
-                .unwrap();
+                .get(absorbing_cluster_id.as_ref())?
+                .expect(&format!("Cannot find absorbing cluster: {absorbing_cluster_id:?}"));
 
             from_bytes::<Vec<VectorId>, rancor::Error>(&bytes)
                 .unwrap()
@@ -53,11 +51,11 @@ impl ClusterMembership {
                 .collect()
         };
 
-        let absorbed_cluster: HashSet<VectorId> = {
+        let merging_cluster: HashSet<VectorId> = {
             let bytes = self
                 .cluster_to_vector
-                .get(absorbed_cluster_id.as_ref())?
-                .unwrap();
+                .get(merging_cluster_id.as_ref())?
+                .expect(&format!("Cannot find merging cluster: {merging_cluster_id:?}"));
 
             from_bytes::<Vec<VectorId>, rancor::Error>(&bytes)
                 .unwrap()
@@ -67,12 +65,12 @@ impl ClusterMembership {
 
         // update vtc
         {
-            for vector_id in &absorbed_cluster {
+            for vector_id in &merging_cluster {
                 let _ = self
                     .vector_to_cluster
                     .insert(
                         vector_id.as_ref(),
-                        to_bytes::<rancor::Error>(merge_cluster_id)
+                        to_bytes::<rancor::Error>(absorbing_cluster_id)
                             .unwrap()
                             .as_ref(),
                     )
@@ -83,11 +81,11 @@ impl ClusterMembership {
         // add to merge
         {
             let merged_vectors: Vec<VectorId> =
-                merge_cluster.union(&absorbed_cluster).cloned().collect();
+                absorbing_cluster.union(&merging_cluster).cloned().collect();
             let _ = self
                 .cluster_to_vector
                 .insert(
-                    merge_cluster_id.as_ref(),
+                    absorbing_cluster_id.as_ref(),
                     to_bytes::<rancor::Error>(&merged_vectors).unwrap().as_ref(),
                 )
                 .unwrap();
@@ -96,7 +94,7 @@ impl ClusterMembership {
         {
             let _ = self
                 .cluster_to_vector
-                .remove(absorbed_cluster_id.as_ref())
+                .remove(merging_cluster_id.as_ref())
                 .unwrap();
         }
         Ok(())
@@ -177,131 +175,135 @@ where
         let new_id = Uuid::new_v4();
         let new_edges: Db = sled::open(&format!("data/clusters/{}/edges", new_id.to_string()))?;
         let new_meta: Db = sled::open(&format!("data/clusters/{}/meta", new_id.to_string()))?;
-        let mut new_membership = ClusterMembership {
+        let new_membership = ClusterMembership {
             cluster_to_vector: sled::open(&format!("data/clusters/{}/ctv", new_id.to_string()))?,
             vector_to_cluster: sled::open(&format!("data/clusters/{}/vtc", new_id.to_string()))?,
         };
 
-        // copy edges
-        {
-            edges
-                .iter()
-                .map(|x| x.unwrap())
-                .filter(|(_, dist)| {
-                    let dist = from_bytes::<A, rancor::Error>(&dist).unwrap();
-
-                    dist >= threshold
-                })
-                .for_each(|(key, val)| {
-                    new_edges.insert(key, val);
-                });
-        }
-        // copy meta
-        {
-            meta.iter().map(|x| x.unwrap()).for_each(|(key, val)| {
-                new_meta.insert(key, val);
-            });
-        }
-
-        // Copy vector membership
-        {
-            vector_to_cluster
-                .iter()
-                .map(|x| x.unwrap())
-                .for_each(|(key, val)| {
-                    new_membership.vector_to_cluster.insert(&key, &val);
-                });
-
-            cluster_to_vector
-                .iter()
-                .map(|x| x.unwrap())
-                .for_each(|(key, val)| {
-                    new_membership.cluster_to_vector.insert(key, val);
-                });
-        }
-        // merge clusters
-        {
-            edges
-                .iter()
-                .map(|x| x.unwrap())
-                .filter(|(_, dist)| {
-                    let dist = from_bytes::<A, rancor::Error>(&dist).unwrap();
-
-                    dist >= threshold
-                })
-                .map(|(bytes, _)| bytes_to_uuid_pair(&bytes).unwrap())
-                .map(|(id_1, id_2)| (VectorId(id_1), VectorId(id_2)))
-                .map(|(id_1, id_2)| {
-                    (
-                        other.membership.get_cluster_id(&id_1).unwrap(),
-                        other.membership.get_cluster_id(&id_2).unwrap(),
-                    )
-                })
-                .for_each(|(cluster_id_1, cluster_id_2)| {
-                    let cluster_meta_1: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                        &meta.get(&cluster_id_1).unwrap().unwrap(),
-                    )
-                    .unwrap();
-                    let cluster_meta_2: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                        &meta.get(&cluster_id_2).unwrap().unwrap(),
-                    )
-                    .unwrap();
-
-                    let (
-                        (merge_cluster_id, merge_cluster_meta),
-                        (absorbed_cluster_id, absorbed_cluster_meta),
-                    ) = match cluster_meta_1.size < cluster_meta_2.size {
-                        true => (
-                            (cluster_id_2, cluster_meta_2),
-                            (cluster_id_1, cluster_meta_1),
-                        ),
-                        false => (
-                            (cluster_id_1, cluster_meta_1),
-                            (cluster_id_2, cluster_meta_2),
-                        ),
-                    };
-
-                    // update meta
-                    {
-                        let mut tmp_meta: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                            &meta.get(&merge_cluster_id).unwrap().unwrap(),
-                        )
-                        .unwrap();
-
-                        tmp_meta.size += absorbed_cluster_meta.size;
-
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&tmp_meta).unwrap();
-
-                        new_meta.insert(merge_cluster_id, bytes.as_ref()).unwrap();
-                    }
-                    {
-                        let mut tmp_meta: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                            &meta.get(&absorbed_cluster_id).unwrap().unwrap(),
-                        )
-                        .unwrap();
-
-                        tmp_meta.merged_into = Some(merge_cluster_id);
-
-                        let bytes: AlignedVec = to_bytes::<rancor::Error>(&tmp_meta).unwrap();
-
-                        new_meta
-                            .insert(absorbed_cluster_id, bytes.as_ref())
-                            .unwrap();
-                    }
-
-                    // update membership
-                    new_membership.merge_clusters(&merge_cluster_id, &absorbed_cluster_id);
-                });
-        }
-
-        Ok(Self {
+        let mut new_cluster_set = Self {
             threshold,
             id: Uuid::new_v4(),
 
             edges: new_edges,
             meta: new_meta,
             membership: new_membership,
-        })
+        };
+
+        // copy edges
+        {
+            let _copy_edges = edges
+                .iter()
+                .map(|x| x.unwrap())
+                .filter(|(_, dist_bytes)| {
+                    println!("{dist_bytes:?}");
+                    // let dist = from_bytes::<A, rancor::Error>(&dist_bytes).unwrap();
+                    let dist = (unsafe { from_bytes_unchecked::<A, rancor::Error>(&dist_bytes) }).unwrap();
+
+                    println!("{dist:?}");
+
+                    dist >= threshold
+                })
+                .map(|(key, val)| new_cluster_set.edges.insert(key, val)
+                    .or_else(|x| {
+                        println!("{x:?}");
+                        Err(x)
+                    })
+                )
+                .all(|val| val.is_ok());
+
+            if !_copy_edges {
+                return Err(todo!())
+            }
+        }
+        // copy meta
+        {
+            let _copy_meta = meta.iter()
+                .map(|x| x.unwrap())
+                .map(|(key, val)| new_cluster_set.meta.insert(key, val)
+                    .or_else(|x| {
+                        println!("{x:?}");
+                        Err(x)
+                    })
+                )
+                .all(|val| val.is_ok());
+
+            if !_copy_meta {
+                return Err(todo!())
+            }
+        }
+
+        // Copy vector membership
+        {
+            let _copy_vtc = vector_to_cluster
+                .iter()
+                .map(|x| x.unwrap())
+                .map(|(key, val)| {
+                    new_cluster_set.membership.vector_to_cluster.insert(&key, &val)
+                    .or_else(|x| {
+                        println!("{x:?}");
+                        Err(x)
+                    })
+                })
+                .all(|val| val.is_ok());
+
+            if !_copy_vtc {
+                return Err(todo!())
+            }
+            let _copy_ctv = cluster_to_vector
+                .iter()
+                .map(|x| x.unwrap())
+                .map(|(key, val)| {
+                    new_cluster_set.membership.cluster_to_vector.insert(key, val)
+                    .or_else(|x| {
+                        println!("{x:?}");
+                        Err(x)
+                    })
+                })
+                .all(|val| val.is_ok());
+            
+            if !_copy_ctv {
+                return Err(todo!())
+            }
+        }
+
+
+        // merge clusters
+        {
+            let iter = edges
+                .iter()
+                .map(|x| x.unwrap())
+                .filter(|(_, dist_bytes)| {
+                    let dist = (unsafe { from_bytes_unchecked::<A, rancor::Error>(&dist_bytes) }).unwrap();
+                    // let dist = from_bytes::<A, rancor::Error>(&dist).unwrap();
+
+                    println!("{dist:?} <= {threshold:?}");
+
+                    dist <= threshold
+                })
+                .map(|(bytes, _)| bytes_to_uuid_pair(&bytes).unwrap())
+                .map(|(id_1, id_2)| (VectorId(id_1), VectorId(id_2)))
+                .map(|(id_1, id_2)| {
+                    (
+                        (other.membership.get_cluster_id(&id_1).unwrap(), id_1),
+                        (other.membership.get_cluster_id(&id_2).unwrap(), id_2),
+                    )
+                });
+
+
+            for ((cluster_id_1, vector_id_1), (cluster_id_2, vector_id_2)) in iter {
+                match new_cluster_set.merge_clusters::<5>(cluster_id_1, cluster_id_2) {
+                    Ok(_) | Err(MergeClusterError::SameCluster) => {},
+                    Err(_) => {
+                        return Err(todo!())
+                    },
+                }
+                if new_cluster_set.delete_edge(vector_id_1, vector_id_2).is_err() {
+                    return Err(todo!())
+                }
+            }
+        }
+
+        Ok(new_cluster_set)
     }
 
     pub fn new(threshold: A, dir: String) -> Self {
@@ -450,7 +452,7 @@ where
         vector_id_2: VectorId,
         weight: A,
     ) -> Result<(), ()> {
-        let cluster_id_1 = {
+        let cluster_id_1: ClusterId = {
             let bytes = self
                 .membership
                 .vector_to_cluster
@@ -458,9 +460,9 @@ where
                 .unwrap()
                 .unwrap();
 
-            from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap();
+            from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap()
         };
-        let cluster_id_2 = {
+        let cluster_id_2: ClusterId = {
             let bytes = self
                 .membership
                 .vector_to_cluster
@@ -468,22 +470,42 @@ where
                 .unwrap()
                 .unwrap();
 
-            from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap();
+            from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap()
         };
 
         if cluster_id_1 != cluster_id_2 {
-            self.edges.insert(
-                uuid_pair_to_bytes(vector_id_1.0, vector_id_1.0),
-                to_bytes::<rancor::Error>(&weight).unwrap().as_ref(),
-            );
+            let weight = to_bytes::<rancor::Error>(&weight).unwrap();
+            // println!("add weight: {:?}",weight.as_ref());
+            if let Err(err) = self.edges.insert(
+                uuid_pair_to_bytes(vector_id_1.0, vector_id_2.0),
+                weight.as_ref(),
+            ) {
+                println!("{:?}",err);
+                return Err(())
+            }
+            if let Err(err) = self.edges.insert(
+                uuid_pair_to_bytes(vector_id_2.0, vector_id_1.0),
+                weight.as_ref(),
+            ) {
+                println!("{:?}",err);
+                return Err(())
+            }
         }
 
         Ok(())
     }
 
     pub fn delete_edge(&mut self, vector_id_1: VectorId, vector_id_2: VectorId) -> Result<(), ()> {
-        self.edges
-            .remove(uuid_pair_to_bytes(vector_id_1.0, vector_id_2.0));
+        let uuids = uuid_pair_to_bytes(vector_id_1.0, vector_id_2.0);
+        if let Err(err) = self.edges.remove(uuids) {
+            println!("{:?}",err);
+            return Err(())
+        }
+        let uuids = uuid_pair_to_bytes(vector_id_2.0, vector_id_1.0);
+        if let Err(err) = self.edges.remove(uuids) {
+            println!("{:?}",err);
+            return Err(())
+        }
         Ok(())
     }
 
@@ -495,60 +517,102 @@ where
         &mut self,
         cluster_id_1: ClusterId,
         cluster_id_2: ClusterId,
-    ) -> Result<(), ()> {
-        let cluster_meta_1: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
+    ) -> Result<(), MergeClusterError> {
+        
+        let cluster_id_1 = {
+            let mut cluster_id_1 = cluster_id_1;
+            // println!("cluster_id_1: {cluster_id_1:?}");
+            let mut cluster_meta_1: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
+                &(self.meta.get(&cluster_id_1).unwrap().unwrap()),
+            )
+            .unwrap();
+
+            while let Some(new_cluster_id) = cluster_meta_1.merged_into {
+                cluster_id_1 = new_cluster_id;
+                // println!("updated cluster_id_1: {cluster_id_1:?}");
+
+                cluster_meta_1 = from_bytes::<ClusterMeta, rancor::Error>(
+                    &(self.meta.get(&cluster_id_1).unwrap().unwrap()),
+                )
+                .unwrap();
+            }
+            // println!("Final cluster_id_1: {cluster_id_1:?}");
+
+            cluster_id_1
+        };
+        
+
+        let cluster_id_2 = {
+            let mut cluster_id_2= cluster_id_2;
+            // println!("cluster_id_2: {cluster_id_2:?}");
+            let mut cluster_meta_2: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
+                &(self.meta.get(&cluster_id_2).unwrap().unwrap()),
+            )
+            .unwrap();
+
+            while let Some(new_cluster_id) = cluster_meta_2.merged_into {
+                cluster_id_2 = new_cluster_id;
+                // println!("updated cluster_id_2: {cluster_id_2:?}");
+
+                cluster_meta_2 = from_bytes::<ClusterMeta, rancor::Error>(
+                    &(self.meta.get(&cluster_id_2).unwrap().unwrap()),
+                )
+                .unwrap();
+            }
+            // println!("Final cluster_id_2: {cluster_id_2:?}");
+
+            cluster_id_2
+        };
+
+        if cluster_id_1 == cluster_id_2 {
+            return Err(MergeClusterError::SameCluster)
+        }
+
+
+        let mut cluster_meta_1: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
             &self.meta.get(&cluster_id_1).unwrap().unwrap(),
         )
         .unwrap();
-        let cluster_meta_2: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
+        let mut cluster_meta_2: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
             &self.meta.get(&cluster_id_2).unwrap().unwrap(),
         )
         .unwrap();
 
-        let ((merge_cluster_id, merge_cluster_meta), (absorbed_cluster_id, absorbed_cluster_meta)) =
+        let ((absorbing_cluster_id, absorbing_cluster_meta), (merging_cluster_id, merging_cluster_meta)) =
             match cluster_meta_1.size < cluster_meta_2.size {
                 true => (
-                    (cluster_id_2, cluster_meta_2),
-                    (cluster_id_1, cluster_meta_1),
+                    (cluster_id_2, &mut cluster_meta_2),
+                    (cluster_id_1, &mut cluster_meta_1),
                 ),
                 false => (
-                    (cluster_id_1, cluster_meta_1),
-                    (cluster_id_2, cluster_meta_2),
+                    (cluster_id_1, &mut cluster_meta_1),
+                    (cluster_id_2, &mut cluster_meta_2),
                 ),
             };
-
+        
         // update meta
         {
-            let mut tmp_meta: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                &self.meta.get(&merge_cluster_id).unwrap().unwrap(),
-            )
-            .unwrap();
+            absorbing_cluster_meta.size += merging_cluster_meta.size;
 
-            tmp_meta.size += absorbed_cluster_meta.size;
+            let bytes: AlignedVec = to_bytes::<rancor::Error>(absorbing_cluster_meta).unwrap();
 
-            let bytes: AlignedVec = to_bytes::<rancor::Error>(&tmp_meta).unwrap();
-
-            self.meta.insert(merge_cluster_id, bytes.as_ref()).unwrap();
+            self.meta.insert(absorbing_cluster_id, bytes.as_ref()).unwrap();
         }
         {
-            let mut tmp_meta: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                &self.meta.get(&absorbed_cluster_id).unwrap().unwrap(),
-            )
-            .unwrap();
+            merging_cluster_meta.merged_into = Some(absorbing_cluster_id);
 
-            tmp_meta.merged_into = Some(merge_cluster_id);
+            let bytes: AlignedVec = to_bytes::<rancor::Error>(merging_cluster_meta).unwrap();
 
-            let bytes: AlignedVec = to_bytes::<rancor::Error>(&tmp_meta).unwrap();
-
-            self.meta
-                .insert(absorbed_cluster_id, bytes.as_ref())
+            self.meta.insert(merging_cluster_id, bytes.as_ref())
                 .unwrap();
         }
 
+
         // update membership
+        // println!("merge {merging_cluster_id:?} |-> {absorbing_cluster_id:?}");
         let _ = self
             .membership
-            .merge_clusters(&merge_cluster_id, &absorbed_cluster_id)
+            .merge_clusters(&absorbing_cluster_id, &merging_cluster_id)
             .unwrap();
 
         Ok(())
@@ -694,16 +758,20 @@ fn bytes_to_uuid_pair(bytes: &[u8]) -> Result<(Uuid, Uuid), String> {
         return Err("Input must be at least 32 bytes".to_string());
     }
 
-    let first = Uuid::from_slice(&bytes[0..16])
+    let uuid_1 = Uuid::from_slice(&bytes[0..16])
         .map_err(|e| format!("Failed to parse first UUID: {}", e))?;
-    let second = Uuid::from_slice(&bytes[16..32])
+    let uuid_2 = Uuid::from_slice(&bytes[16..32])
         .map_err(|e| format!("Failed to parse second UUID: {}", e))?;
+    println!("bytes len: {bytes:?}\nuuid_1: {uuid_1:?}\nuuid_2: {uuid_2:?}");
 
-    Ok((first, second))
+    Ok((uuid_1, uuid_2))
 }
-pub fn uuid_pair_to_bytes(uuid1: Uuid, uuid2: Uuid) -> Vec<u8> {
+pub fn uuid_pair_to_bytes(uuid_1: Uuid, uuid_2: Uuid) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(32);
-    bytes.extend_from_slice(uuid1.as_bytes());
-    bytes.extend_from_slice(uuid2.as_bytes());
+    bytes.extend_from_slice(uuid_1.as_bytes());
+    bytes.extend_from_slice(uuid_2.as_bytes());
+
+    println!("first:{uuid_1:?}\nsecond:{uuid_2:?}\nbytes: {bytes:?}");
+
     bytes
 }

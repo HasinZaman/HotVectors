@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::{
     db::component::{
-        cluster::ClusterSet,
+        cluster::{ClusterSet, MergeClusterError},
         data_buffer::{DataBuffer, Global},
         graph::{GraphSerial, InterPartitionGraph, IntraPartitionGraph},
         ids::{PartitionId, VectorId},
@@ -367,9 +367,10 @@ pub async fn update_cluster<
             continue;
         }
 
-        let _ = cluster_set
-            .merge_clusters::<5>(cluster_id_1, cluster_id_2)
-            .unwrap();
+        match cluster_set.merge_clusters::<5>(cluster_id_1, cluster_id_2) {
+            Ok(_) | Err(MergeClusterError::SameCluster) => {},
+            Err(_) => todo!(),
+        }
     }
 }
 pub async fn remove_cluster_edge<
