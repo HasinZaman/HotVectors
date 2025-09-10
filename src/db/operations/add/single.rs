@@ -223,9 +223,8 @@ where
 
             // update cluster set data
             for cluster_set in cluster_sets.iter_mut() {
-                let cluster_id = cluster_set.new_cluster().unwrap();
                 let _ = cluster_set
-                    .new_cluster_from_vector(VectorId(new_vector.id), cluster_id)
+                    .insert_vector_into_cluster(VectorId(new_vector.id), None)
                     .unwrap();
             }
 
@@ -1797,12 +1796,12 @@ where
 
             {
                 for cluster_set in cluster_sets.iter_mut() {
-                    let cluster_id = cluster_set.new_cluster().unwrap();
                     let _ = cluster_set
-                        .new_cluster_from_vector(VectorId(new_vector.id), cluster_id)
+                        .insert_vector_into_cluster(VectorId(new_vector.id), None)
                         .unwrap();
                 }
 
+                // println!("new_edges:{new_edges:?}\n delete_edges:{deleted_edges:?}");
                 for ((id_1, id_2), dist) in new_edges {
                     update_cluster(cluster_sets, &dist, id_1, id_2).await;
                 }

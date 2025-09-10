@@ -383,23 +383,44 @@ where
         Ok(cluster_id)
     }
 
-    pub fn new_cluster_from_vector(
+    pub fn insert_vector_into_cluster(
         &mut self,
         vector_id: VectorId,
-        cluster_id: ClusterId,
+        cluster_id: Option<ClusterId>,
     ) -> Result<(), ()> {
-        // increase size
-        {
-            let bytes = self.meta.get(cluster_id.as_ref()).unwrap().unwrap();
 
-            let mut meta = from_bytes::<ClusterMeta, rancor::Error>(bytes.as_ref()).unwrap();
-            meta.size += 1;
+        let (cluster_id, mut cluster_meta) = match cluster_id {
+            Some(cluster_id) => {
+                let cluster_id = self.get_parent_cluster(cluster_id);
+
+                // TODO!(Send error if cluster_id doesn't exist)
+                let bytes = self.meta.get(cluster_id.as_ref()).unwrap().unwrap();
+
+                let meta = from_bytes::<ClusterMeta, rancor::Error>(bytes.as_ref()).unwrap();
+            
+                (cluster_id, meta)
+            },
+            None => {
+                let cluster_id = ClusterId(Uuid::new_v4());
+
+                let meta = ClusterMeta {
+                    size: 0,
+                    merged_into: None,
+                };
+
+                (cluster_id, meta)
+            }
+        };
+
+        // increase meta size
+        {
+            cluster_meta.size += 1;
 
             let _ = self
                 .meta
                 .insert(
                     cluster_id.as_ref(),
-                    to_bytes::<rancor::Error>(&meta).unwrap().as_ref(),
+                    to_bytes::<rancor::Error>(&cluster_meta).unwrap().as_ref(),
                 )
                 .unwrap();
         }
@@ -457,8 +478,8 @@ where
                 .membership
                 .vector_to_cluster
                 .get(vector_id_1.as_ref())
-                .unwrap()
-                .unwrap();
+                .expect(&format!("Sled error getting cluster_id for {vector_id_1:?} in the cluster set ({:?})", self.threshold))
+                .expect(&format!("Could not found cluster id for {vector_id_1:?} in the cluster set ({:?})", self.threshold));
 
             from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap()
         };
@@ -467,8 +488,8 @@ where
                 .membership
                 .vector_to_cluster
                 .get(vector_id_2.as_ref())
-                .unwrap()
-                .unwrap();
+                .expect(&format!("Sled error getting cluster_id for {vector_id_2:?} in the cluster set ({:?})", self.threshold))
+                .expect(&format!("Could not found cluster id for {vector_id_2:?} in the cluster set ({:?})", self.threshold));
 
             from_bytes::<ClusterId, rancor::Error>(&bytes.as_ref()).unwrap()
         };
@@ -519,50 +540,8 @@ where
         cluster_id_2: ClusterId,
     ) -> Result<(), MergeClusterError> {
         
-        let cluster_id_1 = {
-            let mut cluster_id_1 = cluster_id_1;
-            // println!("cluster_id_1: {cluster_id_1:?}");
-            let mut cluster_meta_1: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                &(self.meta.get(&cluster_id_1).unwrap().unwrap()),
-            )
-            .unwrap();
-
-            while let Some(new_cluster_id) = cluster_meta_1.merged_into {
-                cluster_id_1 = new_cluster_id;
-                // println!("updated cluster_id_1: {cluster_id_1:?}");
-
-                cluster_meta_1 = from_bytes::<ClusterMeta, rancor::Error>(
-                    &(self.meta.get(&cluster_id_1).unwrap().unwrap()),
-                )
-                .unwrap();
-            }
-            // println!("Final cluster_id_1: {cluster_id_1:?}");
-
-            cluster_id_1
-        };
-        
-
-        let cluster_id_2 = {
-            let mut cluster_id_2= cluster_id_2;
-            // println!("cluster_id_2: {cluster_id_2:?}");
-            let mut cluster_meta_2: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
-                &(self.meta.get(&cluster_id_2).unwrap().unwrap()),
-            )
-            .unwrap();
-
-            while let Some(new_cluster_id) = cluster_meta_2.merged_into {
-                cluster_id_2 = new_cluster_id;
-                // println!("updated cluster_id_2: {cluster_id_2:?}");
-
-                cluster_meta_2 = from_bytes::<ClusterMeta, rancor::Error>(
-                    &(self.meta.get(&cluster_id_2).unwrap().unwrap()),
-                )
-                .unwrap();
-            }
-            // println!("Final cluster_id_2: {cluster_id_2:?}");
-
-            cluster_id_2
-        };
+        let cluster_id_1: ClusterId = self.get_parent_cluster(cluster_id_1);
+        let cluster_id_2: ClusterId = self.get_parent_cluster(cluster_id_2);
 
         if cluster_id_1 == cluster_id_2 {
             return Err(MergeClusterError::SameCluster)
@@ -645,6 +624,8 @@ where
     }
 
     pub fn get_cluster_members(&self, cluster_id: ClusterId) -> Result<Vec<VectorId>, ()> {
+        let cluster_id: ClusterId = self.get_parent_cluster(cluster_id);
+
         let bytes = self
             .membership
             .cluster_to_vector
@@ -660,6 +641,26 @@ where
     pub fn clean_up(&mut self) -> Result<(), ()> {
         todo!()
         // Ok(())
+    }
+
+    pub fn get_parent_cluster(&self, cluster_id: ClusterId) -> ClusterId {
+        let mut cluster_id = cluster_id;
+        
+        let mut cluster_meta: ClusterMeta = from_bytes::<ClusterMeta, rancor::Error>(
+            &(self.meta.get(&cluster_id).unwrap().unwrap()),
+        )
+        .unwrap();
+
+        while let Some(new_cluster_id) = cluster_meta.merged_into {
+            cluster_id = new_cluster_id;
+
+            cluster_meta = from_bytes::<ClusterMeta, rancor::Error>(
+                &(self.meta.get(&cluster_id).unwrap().unwrap()),
+            )
+            .unwrap();
+        }
+
+        cluster_id
     }
 
     // pub fn copy(&self, file_name: String) -> Result<(), ()> {

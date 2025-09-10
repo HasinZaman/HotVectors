@@ -877,6 +877,7 @@ where
                             let min_spanning_tree_buffer = min_spanning_tree_buffer.clone();
                             let inter_spanning_graph: Arc<RwLock<InterPartitionGraph<f32>>> =
                                 inter_spanning_graph.clone();
+                            let access_tx = access_tx.clone();
 
                             let notify_update = notify_update.clone();
 
@@ -890,11 +891,13 @@ where
                                 // let cluster_data = &mut *cluster_data.write().await;
                                 
                                 build_clusters(
+                                    None,
                                     threshold,
                                     meta_data,
                                     cluster_sets,
                                     inter_spanning_graph,
                                     min_spanning_tree_buffer,
+                                    access_tx,
                                 )
                                 .await;
 
